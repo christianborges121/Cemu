@@ -11,6 +11,7 @@
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
+#include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "util/helpers/helpers.h"
 
@@ -121,6 +122,7 @@ int Latte_ThreadEntry()
 	// renderer
 	g_renderer->Initialize();
 	RendererOutputShader::InitializeStatic();
+	StreamingCapture::GetInstance().Initialize();
 
 	LatteTiming_Init();
 	LatteTexture_init();
@@ -248,6 +250,7 @@ bool Latte_GetStopSignal()
 
 void LatteThread_Exit()
 {
+	StreamingCapture::GetInstance().Shutdown();
 	if (g_renderer)
 		g_renderer->Shutdown();
     // clean up vertex/uniform cache

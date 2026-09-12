@@ -1,0 +1,344 @@
+#include "Common/precompiled.h"
+#include "Cafe/HW/Latte/Renderer/VideoEncoder.h"
+#include "Cemu/Logging/CemuLogging.h"
+#include <algorithm>
+
+#if defined(_WIN32)
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "wmcodecdspuuid.lib")
+#pragma comment(lib, "ole32.lib")
+#endif
+
+VideoEncoder& VideoEncoder::GetInstance()
+{
+	static VideoEncoder s_instance;
+	return s_instance;
+}
+
+VideoEncoder::VideoEncoder()
+{
+#if defined(_WIN32)
+	CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	MFStartup(MF_VERSION);
+#endif
+}
+
+VideoEncoder::~VideoEncoder()
+{
+	Shutdown();
+#if defined(_WIN32)
+	MFShutdown();
+	CoUninitialize();
+#endif
+}
+
+bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bitrate)
+{
+	std::lock_guard<std::mutex> lock(m_encoderMutex);
+
+	if (m_isInitialized)
+		Shutdown();
+
+	// Ensure dimensions are even
+	m_width = width & ~1;
+	m_height = height & ~1;
+	m_fps = fps;
+	m_bitrate = bitrate;
+
+	m_nv12Buffer.resize((m_width * m_height * 3) / 2);
+
+#if defined(_WIN32)
+	HRESULT hr = S_OK;
+
+	cemuLog_log(LogType::Force, "VideoEncoder: Activating standard Microsoft H.264 Encoder MFT...");
+	hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
+		IID_IMFTransform, (void**)&m_pTransform);
+
+	if (FAILED(hr) || !m_pTransform)
+	{
+		cemuLog_log(LogType::Force, "VideoEncoder: Failed to create H.264 encoder MFT");
+		return false;
+	}
+
+	// Unlock asynchronous MFTs for synchronous pipeline control
+	IMFAttributes* pAttributes = nullptr;
+	if (SUCCEEDED(m_pTransform->GetAttributes(&pAttributes)))
+	{
+		pAttributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+		pAttributes->Release();
+	}
+
+	// Query ICodecAPI for low latency control
+	m_pTransform->QueryInterface(IID_PPV_ARGS(&m_pCodecAPI));
+	if (m_pCodecAPI)
+	{
+		VARIANT var;
+		VariantInit(&var);
+
+		// Enable ultra low-latency mode (bypasses multi-frame buffering)
+		var.vt = VT_BOOL;
+		var.boolVal = VARIANT_TRUE;
+		m_pCodecAPI->SetValue(&CODECAPI_AVLowLatencyMode, &var);
+
+		// Enable real-time processing
+		var.vt = VT_BOOL;
+		var.boolVal = VARIANT_TRUE;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncCommonRealTime, &var);
+
+		// Common rate control: CBR
+		var.vt = VT_UI4;
+		var.ulVal = eAVEncCommonRateControlMode_CBR;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncCommonRateControlMode, &var);
+
+		// Bitrate
+		var.vt = VT_UI4;
+		var.ulVal = m_bitrate;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
+
+		// Quality vs Speed: 100 (fastest / lowest latency)
+		var.vt = VT_UI4;
+		var.ulVal = 100;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &var);
+
+		// GOP Size: keyframe every 2 seconds (120 frames at 60 FPS)
+		var.vt = VT_UI4;
+		var.ulVal = m_fps * 2;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncMPVGOPSize, &var);
+
+		VariantClear(&var);
+	}
+
+	// 1. Configure Output Media Type (H.264)
+	IMFMediaType* pOutputType = nullptr;
+	MFCreateMediaType(&pOutputType);
+	pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+	pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+	pOutputType->SetUINT32(MF_MT_AVG_BITRATE, m_bitrate);
+	MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, m_width, m_height);
+	MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, m_fps, 1);
+	MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+	pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+	pOutputType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+
+	hr = m_pTransform->SetOutputType(m_outStreamId, pOutputType, 0);
+	pOutputType->Release();
+
+	if (FAILED(hr))
+	{
+		cemuLog_log(LogType::Force, "VideoEncoder: SetOutputType failed (0x{:08x})", (uint32)hr);
+		Shutdown();
+		return false;
+	}
+
+	// 2. Configure Input Media Type (NV12)
+	IMFMediaType* pInputType = nullptr;
+	MFCreateMediaType(&pInputType);
+	pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+	pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+	MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, m_width, m_height);
+	MFSetAttributeRatio(pInputType, MF_MT_FRAME_RATE, m_fps, 1);
+	MFSetAttributeRatio(pInputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+	pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+	hr = m_pTransform->SetInputType(m_inStreamId, pInputType, 0);
+	pInputType->Release();
+
+	if (FAILED(hr))
+	{
+		cemuLog_log(LogType::Force, "VideoEncoder: SetInputType failed (0x{:08x})", (uint32)hr);
+		Shutdown();
+		return false;
+	}
+
+	MFT_OUTPUT_STREAM_INFO streamInfo{};
+	if (SUCCEEDED(m_pTransform->GetOutputStreamInfo(m_outStreamId, &streamInfo)) && streamInfo.cbSize > 0)
+	{
+		m_outBufferSize = streamInfo.cbSize;
+	}
+	else
+	{
+		m_outBufferSize = 1024 * 1024;
+	}
+
+	m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+	m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+#endif
+
+	m_isInitialized = true;
+	cemuLog_log(LogType::Force, "VideoEncoder: Initialized (854x480 @ 60 FPS)");
+	return true;
+}
+
+void VideoEncoder::Shutdown()
+{
+#if defined(_WIN32)
+	if (m_pTransform)
+	{
+		m_pTransform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+		m_pTransform->Release();
+		m_pTransform = nullptr;
+	}
+	if (m_pCodecAPI)
+	{
+		m_pCodecAPI->Release();
+		m_pCodecAPI = nullptr;
+	}
+#endif
+	m_isInitialized = false;
+}
+
+void VideoEncoder::RequestKeyframe()
+{
+	m_forceKeyframeNext = true;
+}
+
+void VideoEncoder::ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint32 srcHeight, uint32 pitch, StreamingPixelFormat pixelFormat, uint8* nv12Y, uint8* nv12UV)
+{
+	// Fast conversion from normalized RGBA32/BGRA32 or packed A2B10G10R10 pixels to NV12.
+	// Supports arbitrary source dimensions (scaled to m_width x m_height) and source pitch.
+	for (uint32 y = 0; y < m_height; ++y)
+	{
+		uint32 srcY = (y * srcHeight) / m_height;
+		const uint8* row = pixels + (srcY * pitch);
+		uint8* yPlaneRow = nv12Y + (y * m_width);
+		uint8* uvPlaneRow = nv12UV + ((y / 2) * m_width);
+
+		for (uint32 x = 0; x < m_width; ++x)
+		{
+			uint32 srcX = (x * srcWidth) / m_width;
+			uint32 r;
+			uint32 g;
+			uint32 b;
+			if (pixelFormat == StreamingPixelFormat::A2B10G10R10)
+			{
+				uint32 packed;
+				memcpy(&packed, row + srcX * 4, sizeof(packed));
+				const auto to8Bit = [](uint32 value) { return (value * 255 + 511) / 1023; };
+				// VK_FORMAT_A2B10G10R10_UNORM_PACK32 stores R in bits 0-9,
+				// G in bits 10-19, B in bits 20-29, and A in bits 30-31.
+				r = to8Bit(packed & 0x3FF);
+				g = to8Bit((packed >> 10) & 0x3FF);
+				b = to8Bit((packed >> 20) & 0x3FF);
+			}
+			else
+			{
+				const bool sourceIsBgra = pixelFormat == StreamingPixelFormat::Bgra8;
+				r = row[srcX * 4 + (sourceIsBgra ? 2 : 0)];
+				g = row[srcX * 4 + 1];
+				b = row[srcX * 4 + (sourceIsBgra ? 0 : 2)];
+			}
+
+			// Y component (ITU-R BT.601 limited range: [16, 235])
+			uint32 yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+			yPlaneRow[x] = static_cast<uint8>(std::clamp<uint32>(yVal, 16, 235));
+
+			// Subsampled UV (2x2)
+			if ((y % 2 == 0) && (x % 2 == 0))
+			{
+				sint32 uVal = ((-38 * (sint32)r - 74 * (sint32)g + 112 * (sint32)b + 128) >> 8) + 128;
+				sint32 vVal = ((112 * (sint32)r - 94 * (sint32)g - 18 * (sint32)b + 128) >> 8) + 128;
+
+				uvPlaneRow[x] = static_cast<uint8>(std::clamp<sint32>(uVal, 16, 240));
+				uvPlaneRow[x + 1] = static_cast<uint8>(std::clamp<sint32>(vVal, 16, 240));
+			}
+		}
+	}
+}
+
+bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height, uint32 pitch, StreamingPixelFormat pixelFormat, uint64 ptsUs, bool forceKeyframe, std::vector<uint8>& outH264)
+{
+	std::lock_guard<std::mutex> lock(m_encoderMutex);
+
+	if (!m_isInitialized || !pixels)
+		return false;
+
+#if defined(_WIN32)
+	if (!m_pTransform)
+		return false;
+
+	// Convert normalized RGBA/BGRA/packed 10-bit pixels to NV12
+	uint8* yPlane = m_nv12Buffer.data();
+	uint8* uvPlane = yPlane + (m_width * m_height);
+	ConvertRGBAToNV12(pixels, width, height, pitch, pixelFormat, yPlane, uvPlane);
+
+	// Force keyframe if requested
+	if ((forceKeyframe || m_forceKeyframeNext) && m_pCodecAPI)
+	{
+		VARIANT var;
+		VariantInit(&var);
+		var.vt = VT_UI4;
+		var.ulVal = 1;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var);
+		VariantClear(&var);
+		m_forceKeyframeNext = false;
+	}
+
+	// Create input Media Sample
+	IMFMediaBuffer* pInputBuffer = nullptr;
+	DWORD bufSize = static_cast<DWORD>(m_nv12Buffer.size());
+	MFCreateMemoryBuffer(bufSize, &pInputBuffer);
+
+	BYTE* pBufferData = nullptr;
+	pInputBuffer->Lock(&pBufferData, nullptr, nullptr);
+	memcpy(pBufferData, m_nv12Buffer.data(), bufSize);
+	pInputBuffer->Unlock();
+	pInputBuffer->SetCurrentLength(bufSize);
+
+	IMFSample* pInputSample = nullptr;
+	MFCreateSample(&pInputSample);
+	pInputSample->AddBuffer(pInputBuffer);
+	pInputSample->SetSampleTime(ptsUs * 10); // 100ns units
+	pInputSample->SetSampleDuration(10000000 / m_fps);
+
+	HRESULT hr = m_pTransform->ProcessInput(m_inStreamId, pInputSample, 0);
+
+	pInputBuffer->Release();
+	pInputSample->Release();
+
+	if (FAILED(hr))
+		return false;
+
+	// Drain output
+	MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
+	DWORD status = 0;
+
+	IMFMediaBuffer* pOutBuffer = nullptr;
+	MFCreateMemoryBuffer(m_outBufferSize, &pOutBuffer);
+	IMFSample* pOutSample = nullptr;
+	MFCreateSample(&pOutSample);
+	pOutSample->AddBuffer(pOutBuffer);
+
+	outputDataBuffer.pSample = pOutSample;
+	outputDataBuffer.dwStreamID = m_outStreamId;
+
+	hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+	if (SUCCEEDED(hr) && outputDataBuffer.pSample)
+	{
+		IMFMediaBuffer* pMediaBuffer = nullptr;
+		outputDataBuffer.pSample->ConvertToContiguousBuffer(&pMediaBuffer);
+		if (pMediaBuffer)
+		{
+			BYTE* pBytes = nullptr;
+			DWORD curLen = 0;
+			pMediaBuffer->Lock(&pBytes, nullptr, &curLen);
+			if (pBytes && curLen > 0)
+			{
+				outH264.assign(pBytes, pBytes + curLen);
+			}
+			pMediaBuffer->Unlock();
+			pMediaBuffer->Release();
+		}
+	}
+
+	if (outputDataBuffer.pEvents)
+		outputDataBuffer.pEvents->Release();
+
+	pOutBuffer->Release();
+	pOutSample->Release();
+
+	return !outH264.empty();
+#else
+	return false;
+#endif
+}

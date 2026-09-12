@@ -9,6 +9,7 @@
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Cafe/HW/Latte/Core/LatteOverlay.h"
+#include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
 
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 
@@ -1003,7 +1004,124 @@ void VulkanRenderer::StopUsingPadAndWait()
 
 bool VulkanRenderer::IsPadWindowActive()
 {
-	return IsSwapchainInfoValid(false);
+	return IsSwapchainInfoValid(false) || StreamingCapture::GetInstance().IsStreamingActive();
+}
+
+void VulkanRenderer::HandleStreamingCapture(LatteTextureView* texView)
+{
+	if (!StreamingCapture::GetInstance().IsStreamingActive() || !texView)
+		return;
+
+	auto texViewVk = (LatteTextureViewVk*)texView;
+	if (texViewVk->firstMip != 0)
+		return;
+	auto baseImageTex = texViewVk->GetBaseImage();
+	if (!baseImageTex)
+		return;
+
+	auto textureVk = baseImageTex->GetImageObj();
+	if (!textureVk)
+		return;
+
+	textureVk->flagForCurrentCommandBuffer();
+	auto dumpImage = textureVk->m_image;
+
+	int width, height;
+	baseImageTex->GetEffectiveSize(width, height, 0);
+	if (width <= 0 || height <= 0)
+		return;
+
+	const auto format = baseImageTex->GetFormat();
+	StreamingPixelFormat pixelFormat;
+	switch (format)
+	{
+	case VK_FORMAT_R8G8B8A8_UNORM:
+	case VK_FORMAT_R8G8B8A8_SRGB:
+		pixelFormat = StreamingPixelFormat::Rgba8;
+		break;
+	case VK_FORMAT_B8G8R8A8_UNORM:
+	case VK_FORMAT_B8G8R8A8_SRGB:
+		pixelFormat = StreamingPixelFormat::Bgra8;
+		break;
+	case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+		pixelFormat = StreamingPixelFormat::A2B10G10R10;
+		break;
+	default:
+		cemuLog_log(LogType::Force, "StreamingCapture: Unsupported DRC Vulkan format {}", (uint32)format);
+		return;
+	}
+
+	// Persistent double-buffer for zero-copy, non-blocking asynchronous DMA readback
+	static VkBuffer s_stagingBuffers[2] = { nullptr, nullptr };
+	static VkDeviceMemory s_stagingMemory[2] = { nullptr, nullptr };
+	static void* s_mappedPtrs[2] = { nullptr, nullptr };
+	static uint64 s_commandBufferIds[2] = { 0, 0 };
+	static uint32 s_widths[2] = { 0, 0 };
+	static uint32 s_heights[2] = { 0, 0 };
+	static uint32 s_pitches[2] = { 0, 0 };
+	static StreamingPixelFormat s_pixelFormats[2] = { StreamingPixelFormat::Rgba8, StreamingPixelFormat::Rgba8 };
+	static int s_bufferIndex = 0;
+	static uint32 s_bufferSize = 0;
+
+	uint32 requiredSize = 4 * width * height;
+	if (s_bufferSize != requiredSize)
+	{
+		for (int i = 0; i < 2; ++i)
+		{
+			if (s_stagingBuffers[i])
+			{
+				vkDestroyBuffer(m_logicalDevice, s_stagingBuffers[i], nullptr);
+				vkFreeMemory(m_logicalDevice, s_stagingMemory[i], nullptr);
+				s_stagingBuffers[i] = nullptr;
+			}
+			memoryManager->CreateBuffer(requiredSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				s_stagingBuffers[i], s_stagingMemory[i]);
+			vkMapMemory(m_logicalDevice, s_stagingMemory[i], 0, VK_WHOLE_SIZE, 0, &s_mappedPtrs[i]);
+		}
+		s_bufferSize = requiredSize;
+		for (int i = 0; i < 2; ++i)
+			s_commandBufferIds[i] = 0;
+	}
+
+	int readIdx = s_bufferIndex;
+	int writeIdx = (s_bufferIndex + 1) % 2;
+	s_bufferIndex = writeIdx;
+
+	// Asynchronously copy current DRC image to the write buffer
+	VkBufferImageCopy region{};
+	region.bufferOffset = 0;
+	region.bufferRowLength = width;
+	region.bufferImageHeight = height;
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.baseArrayLayer = texViewVk->firstSlice;
+	region.imageSubresource.layerCount = 1;
+	region.imageSubresource.mipLevel = texViewVk->firstMip;
+	region.imageOffset = { 0, 0, 0 };
+	region.imageExtent = { (uint32)width, (uint32)height, 1 };
+
+	barrier_image<IMAGE_WRITE | TRANSFER_WRITE, TRANSFER_READ>(baseImageTex, region.imageSubresource, VK_IMAGE_LAYOUT_GENERAL);
+	vkCmdCopyImageToBuffer(m_state.currentCommandBuffer, dumpImage, VK_IMAGE_LAYOUT_GENERAL, s_stagingBuffers[writeIdx], 1, &region);
+	barrier_image<TRANSFER_READ, TRANSFER_WRITE | IMAGE_WRITE>(baseImageTex, region.imageSubresource, baseImageTex->GetDefaultLayout());
+	s_commandBufferIds[writeIdx] = GetCurrentCommandBufferId();
+	s_widths[writeIdx] = (uint32)width;
+	s_heights[writeIdx] = (uint32)height;
+	s_pitches[writeIdx] = (uint32)(width * 4);
+	s_pixelFormats[writeIdx] = pixelFormat;
+
+	static int s_frameCount = 0;
+	s_frameCount++;
+
+	// Process the previous frame's buffer (pipeline DMA complete, zero stall)
+	if (s_frameCount > 1 && s_mappedPtrs[readIdx] && s_commandBufferIds[readIdx] != 0 && HasCommandBufferFinished(s_commandBufferIds[readIdx]))
+	{
+		StreamingCapture::GetInstance().ProcessFramePixels(
+			(const uint8*)s_mappedPtrs[readIdx],
+			s_widths[readIdx],
+			s_heights[readIdx],
+			s_pitches[readIdx],
+			s_pixelFormats[readIdx]);
+	}
 }
 
 void VulkanRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool padView)

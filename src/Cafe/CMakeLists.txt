@@ -168,6 +168,12 @@ add_library(CemuCafe
   HW/Latte/Renderer/RendererOuputShader.h
   HW/Latte/Renderer/RendererShader.cpp
   HW/Latte/Renderer/RendererShader.h
+  HW/Latte/Renderer/StreamingCapture.cpp
+  HW/Latte/Renderer/StreamingCapture.h
+  HW/Latte/Renderer/VideoEncoder.cpp
+  HW/Latte/Renderer/VideoEncoder.h
+  HW/Latte/Renderer/VideoStreamServer.cpp
+  HW/Latte/Renderer/VideoStreamServer.h
   HW/Latte/ShaderInfo/ShaderDescription.cpp
   HW/Latte/ShaderInfo/ShaderInfo.h
   HW/Latte/ShaderInfo/ShaderInstanceInfo.cpp
@@ -680,5 +686,5 @@ if (ENABLE_LIBUSB)
 endif()
 
 if(WIN32)
-	target_link_libraries(CemuCafe PRIVATE iphlpapi)
+	target_link_libraries(CemuCafe PRIVATE iphlpapi ws2_32 mfplat mfuuid wmcodecdspuuid)
 endif()

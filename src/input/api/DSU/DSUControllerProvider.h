@@ -92,10 +92,11 @@ private:
 	uint16 m_server_version = 0;
 
 	std::atomic_bool m_running = false;
-	std::thread m_reader_thread, m_writer_thread;
+	std::thread m_reader_thread, m_writer_thread, m_probe_thread;
 
 	void reader_thread();
 	void writer_thread();
+	void probe_thread();
 	void integrate_motion(uint8_t index, const DataResponse& data_response);
 
 	uint32 m_uid;

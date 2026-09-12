@@ -54,3 +54,9 @@ bin/graphicPacks/*
 
 # Ignore Finder view option files created by OS X
 .DS_Store
+
+# Fork snapshot: regenerable vcpkg outputs (see FORK.md for pinned commits)
+dependencies/vcpkg/buildtrees/
+dependencies/vcpkg/downloads/
+dependencies/vcpkg/packages/
+dependencies/vcpkg/vcpkg_installed/

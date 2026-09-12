@@ -20,6 +20,7 @@ DSUControllerProvider::DSUControllerProvider()
 	m_running = true;
 	m_reader_thread = std::thread(&DSUControllerProvider::reader_thread, this);
 	m_writer_thread = std::thread(&DSUControllerProvider::writer_thread, this);
+	m_probe_thread = std::thread(&DSUControllerProvider::probe_thread, this);
 	request_version();
 }
 
@@ -34,6 +35,7 @@ DSUControllerProvider::DSUControllerProvider(const DSUProviderSettings& settings
 	m_running = true;
 	m_reader_thread = std::thread(&DSUControllerProvider::reader_thread, this);
 	m_writer_thread = std::thread(&DSUControllerProvider::writer_thread, this);
+	m_probe_thread = std::thread(&DSUControllerProvider::probe_thread, this);
 	request_version();
 }
 
@@ -58,6 +60,7 @@ DSUControllerProvider::~DSUControllerProvider()
 				cemuLog_log(LogType::Force, "DSUControllerProvider wakeup failed");
 		}
 		m_reader_thread.join();
+		m_probe_thread.join();
 		m_writerJobs.push(nullptr); // wake up writer thread by pushing an empty message
 		m_writer_thread.join();
 	}
@@ -402,6 +405,16 @@ void DSUControllerProvider::writer_thread()
 #endif
 			std::this_thread::sleep_for(std::chrono::milliseconds(250));
 		}
+	}
+}
+
+void DSUControllerProvider::probe_thread()
+{
+	SetThreadName("DSU-probe");
+	while (m_running.load(std::memory_order_relaxed))
+	{
+		request_pad_data();
+		std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
 }
 

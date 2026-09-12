@@ -205,6 +205,7 @@ public:
 	bool IsPadWindowActive() override;
 
 	void HandleScreenshotRequest(LatteTextureView* texView, bool padView) override;
+	void HandleStreamingCapture(LatteTextureView* texView) override;
 
 	void QueryMemoryInfo();
 	void QueryAvailableFormats();

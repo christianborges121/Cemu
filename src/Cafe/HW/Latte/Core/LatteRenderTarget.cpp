@@ -8,6 +8,7 @@
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
+#include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Cafe/GraphicPack/GraphicPack2.h"
 #include "HW/Latte/Renderer/RendererCore.h"
@@ -963,6 +964,8 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 	cemu_assert(shader);
 	g_renderer->DrawBackbufferQuad(textureView, shader, filter==LatteTextureView::MagFilter::kLinear, imageX, imageY, imageWidth, imageHeight, isPadView, clearBackground);
 	g_renderer->HandleScreenshotRequest(textureView, isPadView);
+	if (isPadView)
+		g_renderer->HandleStreamingCapture(textureView);
 	if (!g_renderer->ImguiBegin(!isPadView))
 		return;
 	swkbd_render(!isPadView);
@@ -1006,8 +1009,9 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 
 	bool showDRC = swkbd_hasKeyboardInputHook() == false && (isDRCPrimary ^ altScreenRequested);
 
-	if ((renderTarget & RENDER_TARGET_DRC) && g_renderer->IsPadWindowActive())
+	if ((renderTarget & RENDER_TARGET_DRC) && (g_renderer->IsPadWindowActive() || StreamingCapture::GetInstance().IsStreamingActive()))
 		LatteRenderTarget_copyToBackbuffer(texView, true);
+
 	if (((renderTarget & RENDER_TARGET_TV) && !showDRC) || ((renderTarget & RENDER_TARGET_DRC) && showDRC))
 		LatteRenderTarget_copyToBackbuffer(texView, false);
 }
