@@ -34,6 +34,14 @@ public:
 	bool IsInitialized() const { return m_isInitialized; }
 	bool WasLastFrameKeyframe() const { return m_lastFrameWasKeyframe; }
 
+	// Runtime reconfiguration (Phase 4.2). Safe to call from any thread.
+	// SetBitrate updates the live MFT target when streaming; the value is
+	// always stored so a later Initialize() picks it up.
+	bool SetBitrate(uint32 bitrateBps);
+	// SetResolution reinitializes the encoder for an allowlisted target
+	// (854x480, 1280x720, 1920x1080). Returns false for unsupported sizes.
+	bool SetResolution(uint16 width, uint16 height);
+
 private:
 	VideoEncoder();
 	~VideoEncoder();

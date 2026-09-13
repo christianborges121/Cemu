@@ -40,6 +40,8 @@ public:
 	static constexpr uint8 OPCODE_TRANSPORT_UDP = 0x11;
 	static constexpr uint8 OPCODE_TRANSPORT_TCP = 0x12;
 	static constexpr uint8 OPCODE_MIC_BLOW = 0x13;
+	static constexpr uint8 OPCODE_SET_BITRATE = 0x14;    // uint32 bitrate_bps (little-endian)
+	static constexpr uint8 OPCODE_SET_RESOLUTION = 0x15; // uint16 width + uint16 height (little-endian)
 
 	// Ports
 	static constexpr uint16 AUDIO_PORT = 26762;

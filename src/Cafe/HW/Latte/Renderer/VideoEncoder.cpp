@@ -292,6 +292,78 @@ void VideoEncoder::RequestKeyframe()
 	m_forceKeyframeNext = true;
 }
 
+bool VideoEncoder::SetBitrate(uint32 bitrateBps)
+{
+	constexpr uint32 kMinBitrateBps = 500000;
+	constexpr uint32 kMaxBitrateBps = 20000000;
+	const uint32 clamped = std::min(std::max(bitrateBps, kMinBitrateBps), kMaxBitrateBps);
+
+	std::lock_guard<std::mutex> lock(m_encoderMutex);
+	m_bitrate = clamped;
+
+#if defined(_WIN32)
+	if (m_pTransform && m_pCodecAPI)
+	{
+		VARIANT var;
+		VariantInit(&var);
+		var.vt = VT_UI4;
+		var.ulVal = clamped;
+		if (SUCCEEDED(m_pCodecAPI->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var)))
+		{
+			cemuLog_log(LogType::Force, "VideoEncoder: Live updated bitrate to {} bps", clamped);
+			return true;
+		}
+		cemuLog_log(LogType::Force, "VideoEncoder: Live bitrate update rejected by MFT, stored {} bps", clamped);
+		return false;
+	}
+#endif
+	// Encoder not running: stored value applies at the next Initialize().
+	return true;
+}
+
+bool VideoEncoder::SetResolution(uint16 width, uint16 height)
+{
+	// Allowlist matching the Android resolution presets. The capture scaler
+	// and MFT output type negotiation are validated for these targets only.
+	uint32 targetW = 0;
+	uint32 targetH = 0;
+	if (width == 854 && height == 480)
+	{
+		targetW = 854;
+		targetH = 480;
+	}
+	else if (width == 1280 && height == 720)
+	{
+		targetW = 1280;
+		targetH = 720;
+	}
+	else if (width == 1920 && height == 1080)
+	{
+		targetW = 1920;
+		targetH = 1080;
+	}
+	else
+	{
+		cemuLog_log(LogType::Force, "VideoEncoder: Rejected unsupported resolution {}x{}", width, height);
+		return false;
+	}
+
+	uint32 fps;
+	uint32 bitrate;
+	{
+		std::lock_guard<std::mutex> lock(m_encoderMutex);
+		if (m_width == targetW && m_height == targetH)
+			return true;
+		fps = m_fps;
+		bitrate = m_bitrate;
+	}
+
+	cemuLog_log(LogType::Force, "VideoEncoder: Reconfiguring resolution to {}x{}", targetW, targetH);
+	// Note: Initialize() takes m_encoderMutex internally, so it must be
+	// called without holding the lock here (non-recursive mutex).
+	return Initialize(targetW, targetH, fps, bitrate);
+}
+
 void VideoEncoder::ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint32 srcHeight, uint32 pitch, StreamingPixelFormat pixelFormat, uint8* nv12Y, uint8* nv12UV)
 {
 	const bool noScale = (srcWidth == m_width && srcHeight == m_height);

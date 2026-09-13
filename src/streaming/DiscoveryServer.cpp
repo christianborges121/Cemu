@@ -254,11 +254,23 @@ void DiscoveryServer::HandlePacket(const char* data, int length, uint32_t sender
 	if (data == nullptr || length <= 0)
 		return;
 
+	in_addr senderAddr{};
+	senderAddr.s_addr = htonl(senderIpHostOrder);
+	char senderIp[64] = {};
+#if defined(_WIN32)
+	InetNtopA(AF_INET, &senderAddr, senderIp, sizeof(senderIp));
+#else
+	inet_ntop(AF_INET, &senderAddr, senderIp, sizeof(senderIp));
+#endif
+
 	std::string payload(data, static_cast<size_t>(length));
 
-	// Phone looking for this PC -> answer directly.
+	// Phone looking for this PC -> answer directly and track it so the
+	// pairing dialog lists phones running older app builds that only
+	// broadcast (the Android DiscoveryClient pings every 2 seconds).
 	if (payload.compare(0, strlen(kBeaconDiscover), kBeaconDiscover) == 0)
 	{
+		UpsertDevice(senderIp[0] ? senderIp : "unknown", "CemuPad", kDsuPort, kVideoPort, kAudioPort);
 		NativeSocket sock = static_cast<NativeSocket>(m_socket.load());
 		if (sock == kInvalidNative)
 			return;
@@ -302,15 +314,7 @@ void DiscoveryServer::HandlePacket(const char* data, int length, uint32_t sender
 		const uint16_t videoPort = parts.size() > 2 ? ParsePort(parts[2], kVideoPort) : kVideoPort;
 		const uint16_t audioPort = parts.size() > 3 ? ParsePort(parts[3], kAudioPort) : kAudioPort;
 
-		in_addr addr{};
-		addr.s_addr = htonl(senderIpHostOrder);
-		char ipBuf[64] = {};
-#if defined(_WIN32)
-		InetNtopA(AF_INET, &addr, ipBuf, sizeof(ipBuf));
-#else
-		inet_ntop(AF_INET, &addr, ipBuf, sizeof(ipBuf));
-#endif
-		UpsertDevice(ipBuf[0] ? ipBuf : "unknown", name, dsuPort, videoPort, audioPort);
+		UpsertDevice(senderIp[0] ? senderIp : "unknown", name, dsuPort, videoPort, audioPort);
 	}
 	// "CEMU_DISCOVER" probes (ours or the phone's mirrored copy) are ignored.
 }

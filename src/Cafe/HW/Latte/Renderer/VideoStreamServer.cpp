@@ -1,6 +1,7 @@
 #include "Common/precompiled.h"
 #include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 #include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
+#include "Cafe/HW/Latte/Renderer/VideoEncoder.h"
 #include "Cemu/Logging/CemuLogging.h"
 
 #if defined(_WIN32)
@@ -478,6 +479,19 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 	SOCKET s = (SOCKET)clientSocket;
 	uint8 opcode = 0;
 
+	auto readExact = [&](void* buffer, size_t size) -> bool {
+		uint8* dst = static_cast<uint8*>(buffer);
+		size_t received = 0;
+		while (received < size)
+		{
+			int r = recv(s, reinterpret_cast<char*>(dst + received), static_cast<int>(size - received), 0);
+			if (r <= 0)
+				return false;
+			received += static_cast<size_t>(r);
+		}
+		return true;
+	};
+
 	while (m_isRunning)
 	{
 		int bytesRead = recv(s, reinterpret_cast<char*>(&opcode), 1, 0);
@@ -521,6 +535,35 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 			{
 				m_micBlowActive.store(blowState != 0);
 				cemuLog_log(LogType::Force, "VideoStreamServer: Mic blow state = {}", blowState != 0);
+			}
+		}
+		else if (opcode == OPCODE_SET_BITRATE)
+		{
+			uint8 payload[4]{};
+			if (readExact(payload, sizeof(payload)))
+			{
+				const uint32 bitrate =
+					static_cast<uint32>(payload[0]) |
+					(static_cast<uint32>(payload[1]) << 8) |
+					(static_cast<uint32>(payload[2]) << 16) |
+					(static_cast<uint32>(payload[3]) << 24);
+				cemuLog_log(LogType::Force, "VideoStreamServer: Received SET_BITRATE = {} bps", bitrate);
+				VideoEncoder::GetInstance().SetBitrate(bitrate);
+			}
+		}
+		else if (opcode == OPCODE_SET_RESOLUTION)
+		{
+			uint8 payload[4]{};
+			if (readExact(payload, sizeof(payload)))
+			{
+				const uint16 width = static_cast<uint16>(payload[0] | (payload[1] << 8));
+				const uint16 height = static_cast<uint16>(payload[2] | (payload[3] << 8));
+				cemuLog_log(LogType::Force, "VideoStreamServer: Received SET_RESOLUTION = {}x{}", width, height);
+				if (VideoEncoder::GetInstance().SetResolution(width, height))
+				{
+					// New SPS/PPS: force a keyframe so the phone re-syncs immediately.
+					VideoEncoder::GetInstance().RequestKeyframe();
+				}
 			}
 		}
 	}
