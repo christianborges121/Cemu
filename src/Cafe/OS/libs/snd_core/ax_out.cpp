@@ -2,8 +2,8 @@
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
 #include "Cafe/HW/MMU/MMU.h"
 #include "audio/IAudioAPI.h"
-//#include "ax.h"
 #include "config/CemuConfig.h"
+#include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 
 namespace snd_core
 {
@@ -321,6 +321,8 @@ namespace snd_core
 		{
 			if (g_padAudio)
 				g_padAudio->FeedBlock(tempDRCChannelData);
+
+			VideoStreamServer::GetInstance().BroadcastAudio(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * channels * sizeof(sint16));
 
 			tempDRCAudioBlockCounter = 0;
 		}

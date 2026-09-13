@@ -1,6 +1,6 @@
 #include "input/emulated/EmulatedController.h"
-
 #include "input/api/Controller.h"
+#include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 
 #ifdef SUPPORTS_WIIMOTE
 #include "input/api/Wiimote/NativeWiimoteController.h"
@@ -82,6 +82,7 @@ void EmulatedController::start_rumble()
 	{
 		controller->start_rumble();
 	}
+	VideoStreamServer::GetInstance().BroadcastRumble(true, 255, 60);
 }
 
 void EmulatedController::stop_rumble()
@@ -96,6 +97,7 @@ void EmulatedController::stop_rumble()
 	{
 		controller->stop_rumble();
 	}
+	VideoStreamServer::GetInstance().BroadcastRumble(false, 0, 0);
 }
 
 bool EmulatedController::is_battery_low() const

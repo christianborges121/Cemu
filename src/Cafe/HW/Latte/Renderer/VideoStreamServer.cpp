@@ -62,6 +62,7 @@ bool VideoStreamServer::Start(uint16 port)
 	}
 
 	m_serverThread = std::thread(&VideoStreamServer::ServerThreadFunc, this);
+	m_discoveryThread = std::thread(&VideoStreamServer::DiscoveryThreadFunc, this);
 	cemuLog_log(LogType::Force, "VideoStreamServer: Started on TCP port {}", port);
 	return true;
 }
@@ -96,8 +97,21 @@ void VideoStreamServer::Stop()
 		m_udpSock = INVALID_SOCKET;
 	}
 
+	if (m_discoverySock != INVALID_SOCKET)
+	{
+#if defined(_WIN32)
+		closesocket(m_discoverySock);
+#else
+		close((int)m_discoverySock);
+#endif
+		m_discoverySock = INVALID_SOCKET;
+	}
+
 	if (m_serverThread.joinable())
 		m_serverThread.join();
+
+	if (m_discoveryThread.joinable())
+		m_discoveryThread.join();
 
 	for (auto& t : m_rxThreads)
 	{
@@ -264,6 +278,104 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 	}
 }
 
+void VideoStreamServer::BroadcastRumble(bool active, uint8 intensity, uint16 durationMs)
+{
+	uint8 payload[4];
+	payload[0] = active ? 1 : 0;
+	payload[1] = intensity;
+	payload[2] = static_cast<uint8>(durationMs & 0xFF);
+	payload[3] = static_cast<uint8>((durationMs >> 8) & 0xFF);
+
+	std::vector<uint8> packet;
+	packet.reserve(17);
+	packet.push_back(PACKET_TYPE_RUMBLE);
+
+	uint32 len = 4;
+	packet.push_back(static_cast<uint8>(len & 0xFF));
+	packet.push_back(static_cast<uint8>((len >> 8) & 0xFF));
+	packet.push_back(static_cast<uint8>((len >> 16) & 0xFF));
+	packet.push_back(static_cast<uint8>((len >> 24) & 0xFF));
+
+	for (int i = 0; i < 8; ++i)
+		packet.push_back(0);
+
+	packet.insert(packet.end(), payload, payload + 4);
+
+	std::vector<ClientInfo> clientSnapshot;
+	{
+		std::lock_guard<std::mutex> lock(m_clientsMutex);
+		clientSnapshot = m_clients;
+	}
+
+	for (auto& client : clientSnapshot)
+	{
+		send((SOCKET)client.socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0);
+	}
+}
+
+void VideoStreamServer::BroadcastAudio(const void* data, size_t size)
+{
+	if (!data || size == 0 || m_udpSock == INVALID_SOCKET)
+		return;
+
+	// Snapshot clients
+	std::vector<sockaddr_in> targets;
+	{
+		std::lock_guard<std::mutex> lock(m_clientsMutex);
+		if (m_clients.empty())
+			return;
+		for (const auto& c : m_clients)
+		{
+			sockaddr_in target = c.addr;
+			target.sin_port = htons(AUDIO_PORT);
+			targets.push_back(target);
+		}
+	}
+
+	const uint8* byteData = reinterpret_cast<const uint8*>(data);
+	const size_t chunkSize = 1152;
+	const uint64 timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()
+	).count();
+
+	uint32 seq = m_audioSeq.fetch_add(1);
+
+	for (size_t offset = 0; offset < size; offset += chunkSize)
+	{
+		size_t curChunk = (std::min)(chunkSize, size - offset);
+		uint8 packet[16 + 1152];
+
+		// Magic: 'A','P'
+		packet[0] = 0x41;
+		packet[1] = 0x50;
+		// Version
+		packet[2] = 1;
+		// Flags: 0x01 = first, 0x02 = last
+		uint8 flags = 0;
+		if (offset == 0) flags |= 0x01;
+		if (offset + curChunk >= size) flags |= 0x02;
+		packet[3] = flags;
+
+		// Sequence (LE uint32)
+		packet[4] = static_cast<uint8>(seq & 0xFF);
+		packet[5] = static_cast<uint8>((seq >> 8) & 0xFF);
+		packet[6] = static_cast<uint8>((seq >> 16) & 0xFF);
+		packet[7] = static_cast<uint8>((seq >> 24) & 0xFF);
+
+		// Timestamp (LE uint64)
+		for (int i = 0; i < 8; ++i)
+			packet[8 + i] = static_cast<uint8>((timestamp >> (i * 8)) & 0xFF);
+
+		// Payload
+		memcpy(packet + 16, byteData + offset, curChunk);
+
+		for (const auto& target : targets)
+		{
+			sendto(m_udpSock, reinterpret_cast<const char*>(packet), static_cast<int>(16 + curChunk), 0, (sockaddr*)&target, sizeof(target));
+		}
+	}
+}
+
 void VideoStreamServer::PruneFinishedRxThreads()
 {
 	for (auto it = m_rxThreads.begin(); it != m_rxThreads.end();)
@@ -409,6 +521,16 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 				}
 			}
 		}
+		else if (opcode == OPCODE_MIC_BLOW)
+		{
+			uint8 blowState = 0;
+			int r = recv(s, reinterpret_cast<char*>(&blowState), 1, 0);
+			if (r > 0)
+			{
+				m_micBlowActive.store(blowState != 0);
+				cemuLog_log(LogType::Force, "VideoStreamServer: Mic blow state = {}", blowState != 0);
+			}
+		}
 	}
 
 	// Control connection dropped: remove the client so UDP-only peers that
@@ -430,4 +552,69 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 #else
 	close((int)s);
 #endif
+}
+
+void VideoStreamServer::DiscoveryThreadFunc()
+{
+	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock == INVALID_SOCKET)
+	{
+		cemuLog_log(LogType::Force, "VideoStreamServer: Failed to create discovery socket");
+		return;
+	}
+
+	int opt = 1;
+	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+	sockaddr_in bindAddr{};
+	bindAddr.sin_family = AF_INET;
+	bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	bindAddr.sin_port = htons(DISCOVERY_PORT);
+
+	if (bind(sock, (sockaddr*)&bindAddr, sizeof(bindAddr)) == SOCKET_ERROR)
+	{
+		cemuLog_log(LogType::Force, "VideoStreamServer: Discovery bind failed on port {}", DISCOVERY_PORT);
+#if defined(_WIN32)
+		closesocket(sock);
+#else
+		close((int)sock);
+#endif
+		return;
+	}
+
+	// 500ms timeout so thread exits when m_isRunning becomes false
+	DWORD timeout = 500;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+
+	m_discoverySock = sock;
+	cemuLog_log(LogType::Force, "VideoStreamServer: UDP discovery listening on port {}", DISCOVERY_PORT);
+
+	char hostName[128] = "Cemu-PC";
+	gethostname(hostName, sizeof(hostName));
+
+	char recvBuf[256];
+	while (m_isRunning)
+	{
+		sockaddr_in senderAddr{};
+		int senderLen = sizeof(senderAddr);
+		int r = recvfrom(sock, recvBuf, sizeof(recvBuf) - 1, 0, (sockaddr*)&senderAddr, &senderLen);
+		if (r <= 0)
+			continue;
+
+		recvBuf[r] = '\0';
+		if (strncmp(recvBuf, "CEMUPAD_DISCOVER", 16) == 0)
+		{
+			// Format: CEMUPAD_HERE:<hostname>:26760:26761:26762
+			std::string reply = fmt::format("CEMUPAD_HERE:{}:26760:{}:26762", hostName, m_port);
+			sendto(sock, reply.c_str(), static_cast<int>(reply.size()), 0, (sockaddr*)&senderAddr, senderLen);
+			cemuLog_log(LogType::Force, "VideoStreamServer: Responded to discovery from {}:{}", inet_ntoa(senderAddr.sin_addr), ntohs(senderAddr.sin_port));
+		}
+	}
+
+#if defined(_WIN32)
+	closesocket(sock);
+#else
+	close((int)sock);
+#endif
+	m_discoverySock = INVALID_SOCKET;
 }

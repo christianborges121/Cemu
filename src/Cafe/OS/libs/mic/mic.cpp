@@ -2,6 +2,7 @@
 #include "input/InputManager.h"
 #include "audio/IAudioInputAPI.h"
 #include "config/CemuConfig.h"
+#include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 
 enum class MIC_RESULT
 {
@@ -440,7 +441,7 @@ void mic_updateOnAXFrame()
 		sint16 micSampleData[micSampleCount];
 
 		auto controller = InputManager::instance().get_vpad_controller(drcIndex);
-		if( controller && controller->is_mic_active() )
+		if( (controller && controller->is_mic_active()) || VideoStreamServer::GetInstance().IsMicBlowActive() )
 		{
 			for(sint32 i=0; i<micSampleCount; i++)
 			{
