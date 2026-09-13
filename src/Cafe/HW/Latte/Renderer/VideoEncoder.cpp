@@ -426,12 +426,37 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	}
 
 	HRESULT hr = m_pTransform->ProcessInput(m_inStreamId, pInputSample, 0);
+	if (hr == MF_E_NOTACCEPTING)
+	{
+		// Drain output buffer to free up MFT pipeline
+		MFT_OUTPUT_DATA_BUFFER drainBuffer{};
+		DWORD drainStatus = 0;
+		IMFMediaBuffer* pDrainBuf = nullptr;
+		MFCreateMemoryBuffer(m_outBufferSize, &pDrainBuf);
+		IMFSample* pDrainSample = nullptr;
+		MFCreateSample(&pDrainSample);
+		pDrainSample->AddBuffer(pDrainBuf);
+		drainBuffer.pSample = pDrainSample;
+		drainBuffer.dwStreamID = m_outStreamId;
+		m_pTransform->ProcessOutput(0, 1, &drainBuffer, &drainStatus);
+		if (drainBuffer.pEvents) drainBuffer.pEvents->Release();
+		pDrainBuf->Release();
+		pDrainSample->Release();
+
+		// Retry ProcessInput
+		hr = m_pTransform->ProcessInput(m_inStreamId, pInputSample, 0);
+	}
 
 	pInputBuffer->Release();
 	pInputSample->Release();
 
 	if (FAILED(hr))
+	{
+		static uint32 s_inputFailCount = 0;
+		if (++s_inputFailCount % 60 == 0)
+			cemuLog_log(LogType::Force, "VideoEncoder: ProcessInput failed (hr=0x{:08X}, count={})", (uint32)hr, s_inputFailCount);
 		return false;
+	}
 
 	// Drain output
 	MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
@@ -447,6 +472,12 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	outputDataBuffer.dwStreamID = m_outStreamId;
 
 	hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+	if (FAILED(hr) && hr != MF_E_TRANSFORM_NEED_MORE_INPUT)
+	{
+		static uint32 s_outFailCount = 0;
+		if (++s_outFailCount % 60 == 0)
+			cemuLog_log(LogType::Force, "VideoEncoder: ProcessOutput failed (hr=0x{:08X}, count={})", (uint32)hr, s_outFailCount);
+	}
 	if (SUCCEEDED(hr) && outputDataBuffer.pSample)
 	{
 		UINT32 isCleanPoint = 0;

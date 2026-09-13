@@ -96,6 +96,11 @@ void StreamingCapture::ProcessFramePixels(const uint8* pixels, uint32 width, uin
 			m_frameQueue.pop_front();
 		m_frameQueue.push_back(std::move(frame));
 	}
+	static uint64 s_capturedCount = 0;
+	if (++s_capturedCount % 600 == 0)
+	{
+		cemuLog_log(LogType::Force, "StreamingCapture: Captured {} DRC frames", s_capturedCount);
+	}
 	m_queueCondition.notify_one();
 }
 
@@ -118,6 +123,16 @@ void StreamingCapture::EncodeWorker()
 
 		m_h264Buffer.clear();
 		if (VideoEncoder::GetInstance().EncodeFrame(frame.pixels.data(), frame.width, frame.height, frame.pitch, frame.pixelFormat, frame.ptsUs, false, m_h264Buffer))
+		{
 			VideoStreamServer::GetInstance().BroadcastFrame(0x01, frame.ptsUs, m_h264Buffer.data(), m_h264Buffer.size(), VideoEncoder::GetInstance().WasLastFrameKeyframe());
+		}
+		else
+		{
+			static uint32 s_encodeFailures = 0;
+			if (++s_encodeFailures % 60 == 0)
+			{
+				cemuLog_log(LogType::Force, "StreamingCapture: EncodeFrame failed (total failures={})", s_encodeFailures);
+			}
+		}
 	}
 }
