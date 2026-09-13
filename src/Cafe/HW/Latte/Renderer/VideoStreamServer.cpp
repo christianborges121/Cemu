@@ -2,6 +2,7 @@
 #include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 #include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
 #include "Cafe/HW/Latte/Renderer/VideoEncoder.h"
+#include "streaming/CemuPadBridge.h"
 #include "Cemu/Logging/CemuLogging.h"
 
 #if defined(_WIN32)
@@ -63,6 +64,7 @@ bool VideoStreamServer::Start(uint16 port)
 	}
 
 	m_serverThread = std::thread(&VideoStreamServer::ServerThreadFunc, this);
+	m_micThread = std::thread(&VideoStreamServer::MicRxThreadFunc, this);
 	// Note: UDP 26763 discovery is owned by streaming/DiscoveryServer
 	// (Phase 4.0). The legacy discovery thread was retired to avoid double-bind.
 	cemuLog_log(LogType::Force, "VideoStreamServer: Started on TCP port {}", port);
@@ -101,6 +103,9 @@ void VideoStreamServer::Stop()
 
 	if (m_serverThread.joinable())
 		m_serverThread.join();
+
+	if (m_micThread.joinable())
+		m_micThread.join();
 
 	for (auto& t : m_rxThreads)
 	{
@@ -590,3 +595,78 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 }
 
 // Note: UDP discovery now lives in streaming/DiscoveryServer (Phase 4.0).
+
+// Voice microphone receiver (Phase 4.3): 32 kHz 16-bit mono PCM datagrams
+// from the phone on UDP 26764. Packets carry an 8-byte little-endian header
+// (uint32 sequence, uint32 sampleCount) followed by int16 LE samples.
+// Decoded chunks are queued into CemuPadBridge; the Cafe audio thread
+// consumes them in mic_updateOnAXFrame (single ringbuffer writer).
+void VideoStreamServer::MicRxThreadFunc()
+{
+	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock == INVALID_SOCKET)
+	{
+		cemuLog_log(LogType::Force, "VideoStreamServer: Failed to create mic socket");
+		return;
+	}
+
+	sockaddr_in bindAddr{};
+	bindAddr.sin_family = AF_INET;
+	bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	bindAddr.sin_port = htons(MIC_PORT);
+	if (bind(sock, (sockaddr*)&bindAddr, sizeof(bindAddr)) != 0)
+	{
+		cemuLog_log(LogType::Force, "VideoStreamServer: Mic bind failed on UDP port {}", MIC_PORT);
+#if defined(_WIN32)
+		closesocket(sock);
+#else
+		close((int)sock);
+#endif
+		return;
+	}
+
+#if defined(_WIN32)
+	DWORD timeoutMs = 500;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
+#else
+	timeval timeout{};
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 500 * 1000;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+#endif
+
+	cemuLog_log(LogType::Force, "VideoStreamServer: Voice mic listening on UDP port {}", MIC_PORT);
+
+	char buffer[4096];
+	while (m_isRunning)
+	{
+		sockaddr_in sender{};
+#if defined(_WIN32)
+		int senderLen = sizeof(sender);
+		const int bytes = recvfrom(sock, buffer, sizeof(buffer), 0, (sockaddr*)&sender, &senderLen);
+#else
+		socklen_t senderLen = sizeof(sender);
+		const ssize_t received = recvfrom(sock, buffer, sizeof(buffer), 0, (sockaddr*)&sender, &senderLen);
+		const int bytes = static_cast<int>(received);
+#endif
+		if (bytes <= 8)
+			continue;
+
+		uint32 sampleCount =
+			static_cast<uint32>(static_cast<uint8>(buffer[4])) |
+			(static_cast<uint32>(static_cast<uint8>(buffer[5])) << 8) |
+			(static_cast<uint32>(static_cast<uint8>(buffer[6])) << 16) |
+			(static_cast<uint32>(static_cast<uint8>(buffer[7])) << 24);
+		if (sampleCount == 0 || sampleCount * sizeof(int16_t) > static_cast<size_t>(bytes - 8))
+			continue;
+
+		CemuPadBridge::GetInstance().QueueMicSamples(
+			reinterpret_cast<const int16_t*>(buffer + 8), static_cast<size_t>(sampleCount));
+	}
+
+#if defined(_WIN32)
+	closesocket(sock);
+#else
+	close((int)sock);
+#endif
+}

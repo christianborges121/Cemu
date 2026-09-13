@@ -3,6 +3,7 @@
 #include "audio/IAudioInputAPI.h"
 #include "config/CemuConfig.h"
 #include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
+#include "streaming/CemuPadBridge.h"
 
 enum class MIC_RESULT
 {
@@ -443,9 +444,18 @@ void mic_updateOnAXFrame()
 		auto controller = InputManager::instance().get_vpad_controller(drcIndex);
 		if( (controller && controller->is_mic_active()) || VideoStreamServer::GetInstance().IsMicBlowActive() )
 		{
-			for(sint32 i=0; i<micSampleCount; i++)
+			memset(micSampleData, 0x00, sizeof(micSampleData));
+			// Prefer live phone microphone PCM when the CemuPad app is
+			// streaming voice; fall back to the synthetic test tone when the
+			// queue is dry (preserves prior behavior for non-voice clients).
+			const size_t queuedSamples = CemuPadBridge::GetInstance().DequeueMicSamples(
+				reinterpret_cast<int16_t*>(micSampleData), static_cast<size_t>(micSampleCount));
+			if (queuedSamples == 0)
 			{
-				micSampleData[i] = (sint16)(sin((float)GetTickCount()*0.1f+sin((float)GetTickCount()*0.0001f)*100.0f)*30000.0f);
+				for(sint32 i=0; i<micSampleCount; i++)
+				{
+					micSampleData[i] = (sint16)(sin((float)GetTickCount()*0.1f+sin((float)GetTickCount()*0.0001f)*100.0f)*30000.0f);
+				}
 			}
 		}
 		else

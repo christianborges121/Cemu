@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -47,8 +48,7 @@ public:
 	void SetRumbleHandler(RumbleHandler handler);
 	void SetRumbleClearHandler(RumbleClearHandler handler);
 
-	// 1-Click programmatic DSU controller configuration.
-	// Binds Controller 0 (VPAD) to the official DSUClient provider pointing
+	// 1-Click programmatic DSU controller configuration..	// Binds Controller 0 (VPAD) to the official DSUClient provider pointing
 	// at <deviceIp>:<dsuPort>, applies the CemuPad default GamePad mapping
 	// and persists controllerProfiles/controller0.xml. Returns true on success.
 	bool AutoConfigureDSUController(const std::string& deviceIp, uint16_t dsuPort = 26760);
@@ -59,6 +59,14 @@ public:
 	bool StartStreaming(const std::string& clientIp);
 	void StopStreaming();
 	std::string GetStreamingTarget() const;
+
+	// Voice microphone queue (phone -> Cemu). Network threads enqueue 32 kHz
+	// 16-bit mono PCM here; the Cafe audio thread dequeues inside
+	// mic_updateOnAXFrame so the mic ringbuffer keeps a single writer.
+	// Oldest samples are dropped when more than 1 second is buffered.
+	void QueueMicSamples(const int16_t* samples, size_t sampleCount);
+	size_t DequeueMicSamples(int16_t* outSamples, size_t maxSamples);
+	void ClearMicQueue();
 
 private:
 	CemuPadBridge() = default;
@@ -76,4 +84,8 @@ private:
 
 	mutable std::mutex m_targetMutex;
 	std::string m_streamingTarget;
+
+	static constexpr size_t kMicQueueCapSamples = 32000; // 1 second at 32 kHz
+	mutable std::mutex m_micMutex;
+	std::deque<int16_t> m_micQueue;
 };

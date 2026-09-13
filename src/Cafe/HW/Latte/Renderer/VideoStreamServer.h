@@ -45,6 +45,7 @@ public:
 
 	// Ports
 	static constexpr uint16 AUDIO_PORT = 26762;
+	static constexpr uint16 MIC_PORT = 26764;
 
 	// UDP video datagram protocol v1 (all multi-byte little-endian)
 	static constexpr uint16 UDP_MAGIC = 0x5043; // 'C','P'
@@ -61,6 +62,7 @@ private:
 
 	void ServerThreadFunc();
 	void ClientRxThreadFunc(uintptr_t clientSocket);
+	void MicRxThreadFunc();
 	void PruneFinishedRxThreads();
 	void SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe);
 
@@ -77,6 +79,7 @@ private:
 
 	std::thread m_serverThread;
 	std::vector<std::thread> m_rxThreads;
+	std::thread m_micThread;
 
 	SOCKET m_udpSock{ INVALID_SOCKET };
 	std::atomic<uint32> m_frameId{ 0 };

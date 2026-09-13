@@ -247,3 +247,36 @@ std::string CemuPadBridge::GetStreamingTarget() const
 	std::lock_guard<std::mutex> lock(m_targetMutex);
 	return m_streamingTarget;
 }
+
+void CemuPadBridge::QueueMicSamples(const int16_t* samples, size_t sampleCount)
+{
+	if (!samples || sampleCount == 0)
+		return;
+	std::lock_guard<std::mutex> lock(m_micMutex);
+	for (size_t i = 0; i < sampleCount; ++i)
+	{
+		if (m_micQueue.size() >= kMicQueueCapSamples)
+			m_micQueue.pop_front();
+		m_micQueue.push_back(samples[i]);
+	}
+}
+
+size_t CemuPadBridge::DequeueMicSamples(int16_t* outSamples, size_t maxSamples)
+{
+	if (!outSamples || maxSamples == 0)
+		return 0;
+	std::lock_guard<std::mutex> lock(m_micMutex);
+	size_t count = 0;
+	while (count < maxSamples && !m_micQueue.empty())
+	{
+		outSamples[count++] = m_micQueue.front();
+		m_micQueue.pop_front();
+	}
+	return count;
+}
+
+void CemuPadBridge::ClearMicQueue()
+{
+	std::lock_guard<std::mutex> lock(m_micMutex);
+	m_micQueue.clear();
+}
