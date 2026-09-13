@@ -33,6 +33,98 @@ VideoEncoder::~VideoEncoder()
 #endif
 }
 
+#if defined(_WIN32)
+IMFTransform* VideoEncoder::CreateBestEncoder()
+{
+	MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Video, MFVideoFormat_H264 };
+
+	IMFActivate** ppActivate = nullptr;
+	UINT32 count = 0;
+
+	// Step 1: Try hardware MFTs first (NVENC, AMF, QuickSync)
+	HRESULT hr = MFTEnumEx(
+		MFT_CATEGORY_VIDEO_ENCODER,
+		MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+		nullptr,        // input type: any
+		&outputType,    // output type: H.264
+		&ppActivate,
+		&count
+	);
+
+	if (SUCCEEDED(hr) && count > 0)
+	{
+		for (UINT32 i = 0; i < count; ++i)
+		{
+			IMFTransform* pTransform = nullptr;
+			hr = ppActivate[i]->ActivateObject(IID_PPV_ARGS(&pTransform));
+			if (SUCCEEDED(hr) && pTransform)
+			{
+				LPWSTR friendlyName = nullptr;
+				UINT32 nameLen = 0;
+				ppActivate[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendlyName, &nameLen);
+				if (friendlyName)
+				{
+					char nameBuf[256] = {};
+					WideCharToMultiByte(CP_UTF8, 0, friendlyName, -1, nameBuf, sizeof(nameBuf), nullptr, nullptr);
+					cemuLog_log(LogType::Force, "VideoEncoder: Using hardware encoder: {}", nameBuf);
+					CoTaskMemFree(friendlyName);
+				}
+				else
+				{
+					cemuLog_log(LogType::Force, "VideoEncoder: Using hardware encoder (index {})", i);
+				}
+
+				for (UINT32 j = 0; j < count; ++j)
+					ppActivate[j]->Release();
+				CoTaskMemFree(ppActivate);
+
+				return pTransform;
+			}
+		}
+		for (UINT32 j = 0; j < count; ++j)
+			ppActivate[j]->Release();
+		CoTaskMemFree(ppActivate);
+	}
+
+	// Step 2: Try software MFTs as fallback
+	hr = MFTEnumEx(
+		MFT_CATEGORY_VIDEO_ENCODER,
+		MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+		nullptr,
+		&outputType,
+		&ppActivate,
+		&count
+	);
+
+	if (SUCCEEDED(hr) && count > 0)
+	{
+		IMFTransform* pTransform = nullptr;
+		hr = ppActivate[0]->ActivateObject(IID_PPV_ARGS(&pTransform));
+		if (SUCCEEDED(hr) && pTransform)
+		{
+			cemuLog_log(LogType::Force, "VideoEncoder: Using software H.264 encoder (fallback)");
+			for (UINT32 j = 0; j < count; ++j)
+				ppActivate[j]->Release();
+			CoTaskMemFree(ppActivate);
+			return pTransform;
+		}
+		for (UINT32 j = 0; j < count; ++j)
+			ppActivate[j]->Release();
+		CoTaskMemFree(ppActivate);
+	}
+
+	// Step 3: Last resort — direct CLSID instantiation
+	cemuLog_log(LogType::Force, "VideoEncoder: Falling back to CLSID_CMSH264EncoderMFT (software)");
+	IMFTransform* pTransform = nullptr;
+	hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
+		IID_IMFTransform, (void**)&pTransform);
+	if (SUCCEEDED(hr))
+		return pTransform;
+
+	return nullptr;
+}
+#endif
+
 bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bitrate)
 {
 	std::lock_guard<std::mutex> lock(m_encoderMutex);
@@ -51,11 +143,8 @@ bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bi
 #if defined(_WIN32)
 	HRESULT hr = S_OK;
 
-	cemuLog_log(LogType::Force, "VideoEncoder: Activating standard Microsoft H.264 Encoder MFT...");
-	hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
-		IID_IMFTransform, (void**)&m_pTransform);
-
-	if (FAILED(hr) || !m_pTransform)
+	m_pTransform = CreateBestEncoder();
+	if (!m_pTransform)
 	{
 		cemuLog_log(LogType::Force, "VideoEncoder: Failed to create H.264 encoder MFT");
 		return false;
@@ -195,22 +284,63 @@ void VideoEncoder::RequestKeyframe()
 
 void VideoEncoder::ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint32 srcHeight, uint32 pitch, StreamingPixelFormat pixelFormat, uint8* nv12Y, uint8* nv12UV)
 {
-	// Fast conversion from normalized RGBA32/BGRA32 or packed A2B10G10R10 pixels to NV12.
-	// Supports arbitrary source dimensions (scaled to m_width x m_height) and source pitch.
+	const bool noScale = (srcWidth == m_width && srcHeight == m_height);
+	const bool isA2B10G10R10 = (pixelFormat == StreamingPixelFormat::A2B10G10R10);
+	const bool sourceIsBgra = (pixelFormat == StreamingPixelFormat::Bgra8);
+	const size_t rIdx = sourceIsBgra ? 2 : 0;
+	const size_t bIdx = sourceIsBgra ? 0 : 2;
+
+	// Fast path: 8-bit RGBA/BGRA without scaling (predominant GamePad streaming path)
+	if (noScale && !isA2B10G10R10)
+	{
+		for (uint32 y = 0; y < m_height; ++y)
+		{
+			const uint8* row = pixels + (y * pitch);
+			uint8* yPlaneRow = nv12Y + (y * m_width);
+			uint8* uvPlaneRow = nv12UV + ((y / 2) * m_width);
+			const bool calcUV = (y % 2 == 0);
+
+			for (uint32 x = 0; x < m_width; ++x)
+			{
+				const uint8* px = row + (x * 4);
+				uint32 r = px[rIdx];
+				uint32 g = px[1];
+				uint32 b = px[bIdx];
+
+				// Y component (ITU-R BT.601 limited range: [16, 235])
+				uint32 yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+				yPlaneRow[x] = static_cast<uint8>(std::clamp<uint32>(yVal, 16, 235));
+
+				// Subsampled UV (2x2)
+				if (calcUV && (x % 2 == 0))
+				{
+					sint32 uVal = ((-38 * (sint32)r - 74 * (sint32)g + 112 * (sint32)b + 128) >> 8) + 128;
+					sint32 vVal = ((112 * (sint32)r - 94 * (sint32)g - 18 * (sint32)b + 128) >> 8) + 128;
+
+					uvPlaneRow[x] = static_cast<uint8>(std::clamp<sint32>(uVal, 16, 240));
+					uvPlaneRow[x + 1] = static_cast<uint8>(std::clamp<sint32>(vVal, 16, 240));
+				}
+			}
+		}
+		return;
+	}
+
+	// General path: arbitrary scaling or packed 10-bit formats
 	for (uint32 y = 0; y < m_height; ++y)
 	{
-		uint32 srcY = (y * srcHeight) / m_height;
+		uint32 srcY = noScale ? y : ((y * srcHeight) / m_height);
 		const uint8* row = pixels + (srcY * pitch);
 		uint8* yPlaneRow = nv12Y + (y * m_width);
 		uint8* uvPlaneRow = nv12UV + ((y / 2) * m_width);
+		const bool calcUV = (y % 2 == 0);
 
 		for (uint32 x = 0; x < m_width; ++x)
 		{
-			uint32 srcX = (x * srcWidth) / m_width;
+			uint32 srcX = noScale ? x : ((x * srcWidth) / m_width);
 			uint32 r;
 			uint32 g;
 			uint32 b;
-			if (pixelFormat == StreamingPixelFormat::A2B10G10R10)
+			if (isA2B10G10R10)
 			{
 				uint32 packed;
 				memcpy(&packed, row + srcX * 4, sizeof(packed));
@@ -223,10 +353,10 @@ void VideoEncoder::ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint3
 			}
 			else
 			{
-				const bool sourceIsBgra = pixelFormat == StreamingPixelFormat::Bgra8;
-				r = row[srcX * 4 + (sourceIsBgra ? 2 : 0)];
-				g = row[srcX * 4 + 1];
-				b = row[srcX * 4 + (sourceIsBgra ? 0 : 2)];
+				const uint8* px = row + (srcX * 4);
+				r = px[rIdx];
+				g = px[1];
+				b = px[bIdx];
 			}
 
 			// Y component (ITU-R BT.601 limited range: [16, 235])
@@ -234,7 +364,7 @@ void VideoEncoder::ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint3
 			yPlaneRow[x] = static_cast<uint8>(std::clamp<uint32>(yVal, 16, 235));
 
 			// Subsampled UV (2x2)
-			if ((y % 2 == 0) && (x % 2 == 0))
+			if (calcUV && (x % 2 == 0))
 			{
 				sint32 uVal = ((-38 * (sint32)r - 74 * (sint32)g + 112 * (sint32)b + 128) >> 8) + 128;
 				sint32 vVal = ((112 * (sint32)r - 94 * (sint32)g - 18 * (sint32)b + 128) >> 8) + 128;

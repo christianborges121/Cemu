@@ -200,18 +200,41 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 	// Payload
 	packet.insert(packet.end(), data, data + size);
 
-	std::lock_guard<std::mutex> lock(m_clientsMutex);
-	for (auto it = m_clients.begin(); it != m_clients.end();)
+	// Snapshot the client list under the lock
+	std::vector<ClientInfo> clientSnapshot;
 	{
-		if (it->useUdp)
+		std::lock_guard<std::mutex> lock(m_clientsMutex);
+		clientSnapshot = m_clients;
+	}
+
+	// Send to each client WITHOUT holding the lock
+	std::vector<uintptr_t> failedSockets;
+	for (auto& client : clientSnapshot)
+	{
+		if (client.useUdp)
 		{
-			SendUdpFrame(it->addr, ptsUs, data, size, isKeyframe);
-			++it;
+			SendUdpFrame(client.addr, ptsUs, data, size, isKeyframe);
 			continue;
 		}
-		uintptr_t s = it->socket;
-		int sent = send((SOCKET)s, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0);
-		if (sent <= 0)
+
+		uintptr_t s = client.socket;
+		const char* buf = reinterpret_cast<const char*>(packet.data());
+		int remaining = static_cast<int>(packet.size());
+		bool sendFailed = false;
+
+		while (remaining > 0)
+		{
+			int sent = send((SOCKET)s, buf, remaining, 0);
+			if (sent <= 0)
+			{
+				sendFailed = true;
+				break;
+			}
+			buf += sent;
+			remaining -= sent;
+		}
+
+		if (sendFailed)
 		{
 			cemuLog_log(LogType::Force, "VideoStreamServer: Client disconnected on send error");
 #if defined(_WIN32)
@@ -219,12 +242,45 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 #else
 			close((int)s);
 #endif
-			it = m_clients.erase(it);
+			failedSockets.push_back(s);
 		}
-		else
+	}
+
+	// Remove failed clients under the lock
+	if (!failedSockets.empty())
+	{
+		std::lock_guard<std::mutex> lock(m_clientsMutex);
+		for (auto failedSocket : failedSockets)
 		{
-			++it;
+			for (auto it = m_clients.begin(); it != m_clients.end(); ++it)
+			{
+				if (it->socket == failedSocket)
+				{
+					m_clients.erase(it);
+					break;
+				}
+			}
 		}
+	}
+}
+
+void VideoStreamServer::PruneFinishedRxThreads()
+{
+	for (auto it = m_rxThreads.begin(); it != m_rxThreads.end();)
+	{
+		if (it->joinable())
+		{
+#if defined(_WIN32)
+			DWORD result = WaitForSingleObject(it->native_handle(), 0);
+			if (result == WAIT_OBJECT_0)
+			{
+				it->join();
+				it = m_rxThreads.erase(it);
+				continue;
+			}
+#endif
+		}
+		++it;
 	}
 }
 
@@ -265,6 +321,8 @@ void VideoStreamServer::ServerThreadFunc()
 
 	while (m_isRunning)
 	{
+		PruneFinishedRxThreads();
+
 		sockaddr_in clientAddr{};
 		int addrLen = sizeof(clientAddr);
 		SOCKET clientSock = accept(listenSock, (sockaddr*)&clientAddr, &addrLen);

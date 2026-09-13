@@ -46,6 +46,7 @@ private:
 
 	void ServerThreadFunc();
 	void ClientRxThreadFunc(uintptr_t clientSocket);
+	void PruneFinishedRxThreads();
 	void SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe);
 
 	struct ClientInfo
