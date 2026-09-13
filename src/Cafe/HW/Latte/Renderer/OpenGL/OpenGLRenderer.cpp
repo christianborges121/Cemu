@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
+#include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
 #include "WindowSystem.h"
 
 #include "Cafe/HW/Latte/Core/LatteRingBuffer.h"
@@ -579,6 +580,82 @@ void OpenGLRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
 	}
 
 	SaveScreenshot(rgb_data, screenshotWidth, screenshotHeight, !padView);
+}
+
+void OpenGLRenderer::HandleStreamingCapture(LatteTextureView* texView)
+{
+	if (!StreamingCapture::GetInstance().IsStreamingActive() || !texView)
+		return;
+
+	int width = 0, height = 0;
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	texture_bindAndActivate(texView, 0);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+
+	if (width <= 0 || height <= 0)
+	{
+		texture_bindAndActivate(nullptr, 0);
+		return;
+	}
+
+	// Persistent double-buffered PBO for asynchronous non-blocking GPU readback
+	static GLuint s_pbo[2] = { 0, 0 };
+	static int s_pboIndex = 0;
+	static uint32 s_bufferSize = 0;
+	static uint32 s_widths[2] = { 0, 0 };
+	static uint32 s_heights[2] = { 0, 0 };
+	static int s_frameCount = 0;
+
+	const uint32 requiredSize = static_cast<uint32>(width * height * 4);
+	if (s_bufferSize != requiredSize)
+	{
+		if (s_pbo[0])
+			glDeleteBuffers(2, s_pbo);
+		glGenBuffers(2, s_pbo);
+		for (int i = 0; i < 2; ++i)
+		{
+			glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[i]);
+			glBufferData(GL_PIXEL_PACK_BUFFER, requiredSize, nullptr, GL_STREAM_READ);
+		}
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+		s_bufferSize = requiredSize;
+		s_frameCount = 0;
+	}
+
+	const int writeIdx = s_pboIndex;
+	const int readIdx = 1 - s_pboIndex;
+	s_pboIndex = 1 - s_pboIndex;
+
+	// Asynchronously copy current DRC image to the write PBO
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[writeIdx]);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	texture_bindAndActivate(nullptr, 0);
+
+	s_widths[writeIdx] = static_cast<uint32>(width);
+	s_heights[writeIdx] = static_cast<uint32>(height);
+	s_frameCount++;
+
+	// Process previous frame from read PBO (zero CPU pipeline stall)
+	if (s_frameCount > 1)
+	{
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[readIdx]);
+		void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+		if (mapped)
+		{
+			StreamingCapture::GetInstance().ProcessFramePixels(
+				reinterpret_cast<const uint8*>(mapped),
+				s_widths[readIdx],
+				s_heights[readIdx],
+				s_widths[readIdx] * 4,
+				StreamingPixelFormat::Rgba8
+			);
+			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+		}
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	}
 }
 
 void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)

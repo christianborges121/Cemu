@@ -15,6 +15,7 @@
 #include "wxgui/helpers/wxHelpers.h"
 #include "Cemu/ncrypto/ncrypto.h"
 #include "wxgui/input/HotkeySettings.h"
+#include "streaming/CemuPadBridge.h"
 #include "wxgui/debugger/DebuggerWindow2.h"
 #include <wx/language.h>
 
@@ -343,6 +344,11 @@ bool CemuApp::OnInit()
 #endif
 	CemuCommonInit();
 
+	// Start the isolated CemuPad subsystem early so phones discover this PC
+	// (UDP 26763 responder) even before any game loads or dialog opens.
+	// Media delegates stay no-ops until streaming handlers register.
+	CemuPadBridge::GetInstance().Initialize();
+
 #if BOOST_OS_MACOS
 	m_sdlEventPumpTimer = new wxTimer(this);
 	Bind(wxEVT_TIMER, &CemuApp::OnSDLEventPumpTimer, this);
@@ -402,6 +408,7 @@ int CemuApp::OnExit()
 	wxApp::OnExit();
 	wxTheClipboard->Flush();
 	InputManager::instance().Shutdown();
+	CemuPadBridge::GetInstance().Shutdown();
 	int retValue = 0;
 	if (auto r = CafeSystem::GetForegroundTitleReturnStatus(); (LaunchSettings::GetLoadFile() || LaunchSettings::GetLoadTitleID()) && r)
 		retValue = *r;

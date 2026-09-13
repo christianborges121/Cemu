@@ -34,14 +34,14 @@ VideoEncoder::~VideoEncoder()
 }
 
 #if defined(_WIN32)
-IMFTransform* VideoEncoder::CreateBestEncoder()
+std::vector<VideoEncoder::MFTCandidate> VideoEncoder::CreateEncoderCandidates()
 {
+	std::vector<MFTCandidate> candidates;
 	MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Video, MFVideoFormat_H264 };
 
+	// Step 1: Discover hardware MFTs (NVENC, AMF, QuickSync)
 	IMFActivate** ppActivate = nullptr;
 	UINT32 count = 0;
-
-	// Step 1: Try hardware MFTs first (NVENC, AMF, QuickSync)
 	HRESULT hr = MFTEnumEx(
 		MFT_CATEGORY_VIDEO_ENCODER,
 		MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
@@ -59,6 +59,7 @@ IMFTransform* VideoEncoder::CreateBestEncoder()
 			hr = ppActivate[i]->ActivateObject(IID_PPV_ARGS(&pTransform));
 			if (SUCCEEDED(hr) && pTransform)
 			{
+				std::string name = "Hardware H.264 Encoder";
 				LPWSTR friendlyName = nullptr;
 				UINT32 nameLen = 0;
 				ppActivate[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendlyName, &nameLen);
@@ -66,30 +67,22 @@ IMFTransform* VideoEncoder::CreateBestEncoder()
 				{
 					char nameBuf[256] = {};
 					WideCharToMultiByte(CP_UTF8, 0, friendlyName, -1, nameBuf, sizeof(nameBuf), nullptr, nullptr);
-					cemuLog_log(LogType::Force, "VideoEncoder: Using hardware encoder: {}", nameBuf);
+					name = nameBuf;
 					CoTaskMemFree(friendlyName);
 				}
-				else
-				{
-					cemuLog_log(LogType::Force, "VideoEncoder: Using hardware encoder (index {})", i);
-				}
-
-				for (UINT32 j = 0; j < count; ++j)
-					ppActivate[j]->Release();
-				CoTaskMemFree(ppActivate);
-
-				return pTransform;
+				candidates.push_back({ pTransform, name, true });
 			}
+			ppActivate[i]->Release();
 		}
-		for (UINT32 j = 0; j < count; ++j)
-			ppActivate[j]->Release();
 		CoTaskMemFree(ppActivate);
 	}
 
-	// Step 2: Try software MFTs as fallback
+	// Step 2: Discover software MFTs as second priority
+	ppActivate = nullptr;
+	count = 0;
 	hr = MFTEnumEx(
 		MFT_CATEGORY_VIDEO_ENCODER,
-		MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+		MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
 		nullptr,
 		&outputType,
 		&ppActivate,
@@ -98,30 +91,40 @@ IMFTransform* VideoEncoder::CreateBestEncoder()
 
 	if (SUCCEEDED(hr) && count > 0)
 	{
-		IMFTransform* pTransform = nullptr;
-		hr = ppActivate[0]->ActivateObject(IID_PPV_ARGS(&pTransform));
-		if (SUCCEEDED(hr) && pTransform)
+		for (UINT32 i = 0; i < count; ++i)
 		{
-			cemuLog_log(LogType::Force, "VideoEncoder: Using software H.264 encoder (fallback)");
-			for (UINT32 j = 0; j < count; ++j)
-				ppActivate[j]->Release();
-			CoTaskMemFree(ppActivate);
-			return pTransform;
+			IMFTransform* pTransform = nullptr;
+			hr = ppActivate[i]->ActivateObject(IID_PPV_ARGS(&pTransform));
+			if (SUCCEEDED(hr) && pTransform)
+			{
+				std::string name = "Software H.264 Encoder MFT";
+				LPWSTR friendlyName = nullptr;
+				UINT32 nameLen = 0;
+				ppActivate[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendlyName, &nameLen);
+				if (friendlyName)
+				{
+					char nameBuf[256] = {};
+					WideCharToMultiByte(CP_UTF8, 0, friendlyName, -1, nameBuf, sizeof(nameBuf), nullptr, nullptr);
+					name = nameBuf;
+					CoTaskMemFree(friendlyName);
+				}
+				candidates.push_back({ pTransform, name, false });
+			}
+			ppActivate[i]->Release();
 		}
-		for (UINT32 j = 0; j < count; ++j)
-			ppActivate[j]->Release();
 		CoTaskMemFree(ppActivate);
 	}
 
-	// Step 3: Last resort — direct CLSID instantiation
-	cemuLog_log(LogType::Force, "VideoEncoder: Falling back to CLSID_CMSH264EncoderMFT (software)");
+	// Step 3: Direct CLSID software instantiation fallback
 	IMFTransform* pTransform = nullptr;
 	hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
 		IID_IMFTransform, (void**)&pTransform);
-	if (SUCCEEDED(hr))
-		return pTransform;
+	if (SUCCEEDED(hr) && pTransform)
+	{
+		candidates.push_back({ pTransform, "CLSID_CMSH264EncoderMFT", false });
+	}
 
-	return nullptr;
+	return candidates;
 }
 #endif
 
@@ -141,24 +144,106 @@ bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bi
 	m_nv12Buffer.resize((m_width * m_height * 3) / 2);
 
 #if defined(_WIN32)
-	HRESULT hr = S_OK;
-
-	m_pTransform = CreateBestEncoder();
-	if (!m_pTransform)
+	auto candidates = CreateEncoderCandidates();
+	if (candidates.empty())
 	{
-		cemuLog_log(LogType::Force, "VideoEncoder: Failed to create H.264 encoder MFT");
+		cemuLog_log(LogType::Force, "VideoEncoder: No H.264 encoder MFT candidates found on system");
 		return false;
 	}
 
-	// Unlock asynchronous MFTs for synchronous pipeline control
-	IMFAttributes* pAttributes = nullptr;
-	if (SUCCEEDED(m_pTransform->GetAttributes(&pAttributes)))
+	bool configured = false;
+	for (auto& cand : candidates)
 	{
-		pAttributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
-		pAttributes->Release();
+		IMFTransform* pTransform = cand.pTransform;
+		if (!pTransform)
+			continue;
+
+		// Unlock asynchronous MFTs for synchronous pipeline control
+		IMFAttributes* pAttributes = nullptr;
+		if (SUCCEEDED(pTransform->GetAttributes(&pAttributes)))
+		{
+			pAttributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+			pAttributes->Release();
+		}
+
+		// Trial resolutions: if 854 is requested, some hardware encoders (e.g. Intel QuickSync)
+		// reject non-16-aligned widths. Try 854 first, and fall back to 848 (16 * 53) if rejected.
+		uint32 trialWidths[2] = { m_width, 0 };
+		if (m_width == 854)
+			trialWidths[1] = 848;
+
+		for (uint32 trialW : trialWidths)
+		{
+			if (trialW == 0)
+				break;
+
+			// 1. Configure Output Media Type (H.264)
+			IMFMediaType* pOutputType = nullptr;
+			MFCreateMediaType(&pOutputType);
+			pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+			pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+			pOutputType->SetUINT32(MF_MT_AVG_BITRATE, m_bitrate);
+			MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, trialW, m_height);
+			MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, m_fps, 1);
+			MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+			pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+			pOutputType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+
+			HRESULT hr = pTransform->SetOutputType(m_outStreamId, pOutputType, 0);
+			pOutputType->Release();
+
+			if (FAILED(hr))
+				continue; // Try next trial width or candidate
+
+			// 2. Configure Input Media Type (NV12)
+			IMFMediaType* pInputType = nullptr;
+			MFCreateMediaType(&pInputType);
+			pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+			pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+			MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, trialW, m_height);
+			MFSetAttributeRatio(pInputType, MF_MT_FRAME_RATE, m_fps, 1);
+			MFSetAttributeRatio(pInputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+			pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+
+			hr = pTransform->SetInputType(m_inStreamId, pInputType, 0);
+			pInputType->Release();
+
+			if (FAILED(hr))
+				continue;
+
+			// Successfully negotiated media types!
+			m_width = trialW;
+			m_nv12Buffer.resize((m_width * m_height * 3) / 2);
+			m_pTransform = pTransform;
+			cand.pTransform = nullptr; // Take ownership
+			configured = true;
+			cemuLog_log(LogType::Force, "VideoEncoder: Selected {} encoder: {} ({}x{} @ {} FPS)",
+				cand.isHardware ? "hardware" : "software", cand.name, m_width, m_height, m_fps);
+			break;
+		}
+
+		if (configured)
+			break;
 	}
 
-	// Query ICodecAPI for low latency control
+	// Release any unused candidate transforms
+	for (auto& cand : candidates)
+	{
+		if (cand.pTransform)
+		{
+			cand.pTransform->Release();
+			cand.pTransform = nullptr;
+		}
+	}
+
+	if (!configured || !m_pTransform)
+	{
+		cemuLog_log(LogType::Force, "VideoEncoder: Failed to configure any H.264 encoder MFT for {}x{}", m_width, m_height);
+		Shutdown();
+		return false;
+	}
+
+	// Query ICodecAPI for low latency control (optional / best-effort)
 	m_pTransform->QueryInterface(IID_PPV_ARGS(&m_pCodecAPI));
 	if (m_pCodecAPI)
 	{
@@ -208,48 +293,6 @@ bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bi
 		VariantClear(&var);
 	}
 
-	// 1. Configure Output Media Type (H.264)
-	IMFMediaType* pOutputType = nullptr;
-	MFCreateMediaType(&pOutputType);
-	pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-	pOutputType->SetUINT32(MF_MT_AVG_BITRATE, m_bitrate);
-	MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, m_width, m_height);
-	MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, m_fps, 1);
-	MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-	pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-	pOutputType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
-
-	hr = m_pTransform->SetOutputType(m_outStreamId, pOutputType, 0);
-	pOutputType->Release();
-
-	if (FAILED(hr))
-	{
-		cemuLog_log(LogType::Force, "VideoEncoder: SetOutputType failed (0x{:08x})", (uint32)hr);
-		Shutdown();
-		return false;
-	}
-
-	// 2. Configure Input Media Type (NV12)
-	IMFMediaType* pInputType = nullptr;
-	MFCreateMediaType(&pInputType);
-	pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	pInputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-	MFSetAttributeSize(pInputType, MF_MT_FRAME_SIZE, m_width, m_height);
-	MFSetAttributeRatio(pInputType, MF_MT_FRAME_RATE, m_fps, 1);
-	MFSetAttributeRatio(pInputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-	pInputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-
-	hr = m_pTransform->SetInputType(m_inStreamId, pInputType, 0);
-	pInputType->Release();
-
-	if (FAILED(hr))
-	{
-		cemuLog_log(LogType::Force, "VideoEncoder: SetInputType failed (0x{:08x})", (uint32)hr);
-		Shutdown();
-		return false;
-	}
-
 	MFT_OUTPUT_STREAM_INFO streamInfo{};
 	if (SUCCEEDED(m_pTransform->GetOutputStreamInfo(m_outStreamId, &streamInfo)) && streamInfo.cbSize > 0)
 	{
@@ -265,7 +308,7 @@ bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bi
 #endif
 
 	m_isInitialized = true;
-	cemuLog_log(LogType::Force, "VideoEncoder: Initialized (854x480 @ 60 FPS)");
+	cemuLog_log(LogType::Force, "VideoEncoder: Initialized ({}x{} @ {} FPS)", m_width, m_height, m_fps);
 	return true;
 }
 
@@ -327,9 +370,9 @@ bool VideoEncoder::SetResolution(uint16 width, uint16 height)
 	// and MFT output type negotiation are validated for these targets only.
 	uint32 targetW = 0;
 	uint32 targetH = 0;
-	if (width == 854 && height == 480)
+	if ((width == 854 || width == 848) && height == 480)
 	{
-		targetW = 854;
+		targetW = width;
 		targetH = 480;
 	}
 	else if (width == 1280 && height == 720)

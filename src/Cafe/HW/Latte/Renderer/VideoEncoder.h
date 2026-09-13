@@ -48,7 +48,13 @@ private:
 
 	void ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint32 srcHeight, uint32 pitch, StreamingPixelFormat pixelFormat, uint8* nv12Y, uint8* nv12UV);
 #if defined(_WIN32)
-	IMFTransform* CreateBestEncoder();
+	struct MFTCandidate
+	{
+		IMFTransform* pTransform{ nullptr };
+		std::string name;
+		bool isHardware{ false };
+	};
+	std::vector<MFTCandidate> CreateEncoderCandidates();
 #endif
 
 	bool m_isInitialized{ false };

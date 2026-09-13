@@ -57,6 +57,7 @@ public:
 	void DrawEmptyFrame(bool mainWindow) override;
 	void ClearColorbuffer(bool padView) override;
 	void HandleScreenshotRequest(LatteTextureView* texView, bool padView) override;
+	void HandleStreamingCapture(LatteTextureView* texView) override;
 
 	void DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground) override;
 
