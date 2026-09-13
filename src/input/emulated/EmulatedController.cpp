@@ -82,7 +82,10 @@ void EmulatedController::start_rumble()
 	{
 		controller->start_rumble();
 	}
-	VideoStreamServer::GetInstance().BroadcastRumble(true, 255, 60);
+	if (type() != VPAD)
+	{
+		VideoStreamServer::GetInstance().BroadcastRumble(true, 255, 60);
+	}
 }
 
 void EmulatedController::stop_rumble()
@@ -97,7 +100,10 @@ void EmulatedController::stop_rumble()
 	{
 		controller->stop_rumble();
 	}
-	VideoStreamServer::GetInstance().BroadcastRumble(false, 0, 0);
+	if (type() != VPAD)
+	{
+		VideoStreamServer::GetInstance().BroadcastRumble(false, 0, 0);
+	}
 }
 
 bool EmulatedController::is_battery_low() const

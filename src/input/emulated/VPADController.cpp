@@ -7,6 +7,7 @@
 #include "input/InputManager.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/CafeSystem.h"
+#include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 
 enum ControllerVPADMapping2 : uint32
 {
@@ -397,6 +398,9 @@ void VPADController::clear_rumble()
 		m_rumble_queue.pop();
 
 	m_parser = 0;
+
+	VideoStreamServer::GetInstance().BroadcastRumble(false, 0, 0);
+	cemuLog_log(LogType::Force, "VPADController::clear_rumble: cleared GamePad rumble");
 }
 
 bool VPADController::push_rumble(uint8* pattern, uint8 length)
@@ -432,6 +436,36 @@ bool VPADController::push_rumble(uint8* pattern, uint8 length)
 		len -= 8;
 	}
 
+	// Calculate active duty cycle and duration envelope for mobile phone haptics
+	size_t activeCount = 0;
+	for (bool b : bitset)
+	{
+		if (b)
+			activeCount++;
+	}
+
+	uint16 durationMs = static_cast<uint16>((bitset.size() * 1000) / 60);
+	if (durationMs < 50 && activeCount > 0)
+		durationMs = 50; // Minimum duration for phone motor to overcome inertia
+
+	uint8 intensity = 0;
+	if (!bitset.empty() && activeCount > 0)
+	{
+		intensity = static_cast<uint8>((activeCount * 255) / bitset.size());
+		if (intensity < 64)
+			intensity = 64; // Perceptible amplitude floor
+	}
+
+	if (activeCount > 0)
+	{
+		VideoStreamServer::GetInstance().BroadcastRumble(true, intensity, durationMs);
+		cemuLog_log(LogType::Force, "VPADController::push_rumble: length={}, activeBits={}/{}, intensity={}, durationMs={}",
+			length, activeCount, bitset.size(), intensity, durationMs);
+	}
+	else
+	{
+		VideoStreamServer::GetInstance().BroadcastRumble(false, 0, 0);
+	}
 
 	m_rumble_queue.emplace(std::move(bitset));
 	m_last_rumble_check = {};

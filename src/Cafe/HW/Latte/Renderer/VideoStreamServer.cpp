@@ -311,6 +311,9 @@ void VideoStreamServer::BroadcastRumble(bool active, uint8 intensity, uint16 dur
 	{
 		send((SOCKET)client.socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0);
 	}
+
+	cemuLog_log(LogType::Force, "VideoStreamServer: BroadcastRumble active={} intensity={} durationMs={} sent to {} clients",
+		active, intensity, durationMs, clientSnapshot.size());
 }
 
 void VideoStreamServer::BroadcastAudio(const void* data, size_t size)
