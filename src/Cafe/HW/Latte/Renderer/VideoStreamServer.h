@@ -64,6 +64,9 @@ private:
 	SOCKET m_udpSock{ INVALID_SOCKET };
 	std::atomic<uint32> m_frameId{ 0 };
 	std::atomic<uint32> m_seq{ 0 };
+	std::atomic<uint64> m_udpFrames{ 0 };
+	std::atomic<uint64> m_udpPackets{ 0 };
+	std::atomic<uint64> m_udpSendErrors{ 0 };
 
 	mutable std::mutex m_clientsMutex;
 	std::vector<ClientInfo> m_clients;

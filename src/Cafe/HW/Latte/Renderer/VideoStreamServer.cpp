@@ -5,6 +5,8 @@
 
 #if defined(_WIN32)
 #pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/ioctl.h>
 #endif
 
 VideoStreamServer& VideoStreamServer::GetInstance()
@@ -39,9 +41,25 @@ bool VideoStreamServer::Start(uint16 port)
 
 	m_udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (m_udpSock == INVALID_SOCKET)
+	{
 		cemuLog_log(LogType::Force, "VideoStreamServer: Failed to create UDP socket");
+	}
 	else
+	{
+		// Non-blocking: a full kernel buffer must drop (and count) instead
+		// of stalling the encode worker shared with TCP clients.
+		int sndBuf = 1024 * 1024;
+#if defined(_WIN32)
+		u_long nonBlocking = 1;
+		ioctlsocket(m_udpSock, FIONBIO, &nonBlocking);
+		setsockopt(m_udpSock, SOL_SOCKET, SO_SNDBUF, (const char*)&sndBuf, sizeof(sndBuf));
+#else
+		int nonBlocking = 1;
+		ioctl(m_udpSock, FIONBIO, &nonBlocking);
+		setsockopt(m_udpSock, SOL_SOCKET, SO_SNDBUF, &sndBuf, sizeof(sndBuf));
+#endif
 		cemuLog_log(LogType::Force, "VideoStreamServer: UDP video ready on port {}", port);
+	}
 
 	m_serverThread = std::thread(&VideoStreamServer::ServerThreadFunc, this);
 	cemuLog_log(LogType::Force, "VideoStreamServer: Started on TCP port {}", port);
@@ -101,6 +119,7 @@ void VideoStreamServer::SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, 
 	if (m_udpSock == INVALID_SOCKET)
 		return;
 
+	const uint64 frameCount = m_udpFrames.fetch_add(1) + 1;
 	const uint32 frameId = m_frameId.fetch_add(1);
 	const uint32 packetCount = static_cast<uint32>((size + UDP_MAX_PAYLOAD - 1) / UDP_MAX_PAYLOAD);
 	uint8 header[UDP_HEADER_SIZE];
@@ -144,7 +163,15 @@ void VideoStreamServer::SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, 
 		uint8 datagram[UDP_HEADER_SIZE + UDP_MAX_PAYLOAD];
 		memcpy(datagram, header, UDP_HEADER_SIZE);
 		memcpy(datagram + UDP_HEADER_SIZE, data + offset, chunk);
-		sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + chunk), 0, (sockaddr*)&dest, sizeof(dest));
+		int sent = sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + chunk), 0, (sockaddr*)&dest, sizeof(dest));
+		if (sent <= 0)
+			m_udpSendErrors.fetch_add(1);
+	}
+	m_udpPackets.fetch_add(packetCount);
+	if ((frameCount % 600) == 0)
+	{
+		cemuLog_log(LogType::Force, "VideoStreamServer: UDP video {} frames, {} packets, {} send errors",
+			m_udpFrames.load(), m_udpPackets.load(), m_udpSendErrors.load());
 	}
 }
 
@@ -303,6 +330,21 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 					cemuLog_log(LogType::Force, "VideoStreamServer: Client switched to {} transport", useUdp ? "UDP" : "TCP");
 					break;
 				}
+			}
+		}
+	}
+
+	// Control connection dropped: remove the client so UDP-only peers that
+	// never fail a TCP send cannot linger forever.
+	{
+		std::lock_guard<std::mutex> lock(m_clientsMutex);
+		for (auto it = m_clients.begin(); it != m_clients.end(); ++it)
+		{
+			if (it->socket == clientSocket)
+			{
+				m_clients.erase(it);
+				cemuLog_log(LogType::Force, "VideoStreamServer: Client control connection closed");
+				break;
 			}
 		}
 	}
