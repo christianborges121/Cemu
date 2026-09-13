@@ -263,7 +263,8 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	ConvertRGBAToNV12(pixels, width, height, pitch, pixelFormat, yPlane, uvPlane);
 
 	// Force keyframe if requested
-	if ((forceKeyframe || m_forceKeyframeNext) && m_pCodecAPI)
+	m_lastFrameWasKeyframe = (forceKeyframe || m_forceKeyframeNext) && (m_pCodecAPI != nullptr);
+	if (m_lastFrameWasKeyframe)
 	{
 		VARIANT var;
 		VariantInit(&var);

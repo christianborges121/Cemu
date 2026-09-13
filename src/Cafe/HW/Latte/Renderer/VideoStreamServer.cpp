@@ -36,6 +36,13 @@ bool VideoStreamServer::Start(uint16 port)
 
 	m_port = port;
 	m_isRunning = true;
+
+	m_udpSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (m_udpSock == INVALID_SOCKET)
+		cemuLog_log(LogType::Force, "VideoStreamServer: Failed to create UDP socket");
+	else
+		cemuLog_log(LogType::Force, "VideoStreamServer: UDP video ready on port {}", port);
+
 	m_serverThread = std::thread(&VideoStreamServer::ServerThreadFunc, this);
 	cemuLog_log(LogType::Force, "VideoStreamServer: Started on TCP port {}", port);
 	return true;
@@ -50,15 +57,25 @@ void VideoStreamServer::Stop()
 
 	{
 		std::lock_guard<std::mutex> lock(m_clientsMutex);
-		for (auto sock : m_clientSockets)
+		for (auto& client : m_clients)
 		{
 #if defined(_WIN32)
-			closesocket((SOCKET)sock);
+			closesocket((SOCKET)client.socket);
 #else
-			close((int)sock);
+			close((int)client.socket);
 #endif
 		}
-		m_clientSockets.clear();
+		m_clients.clear();
+	}
+
+	if (m_udpSock != INVALID_SOCKET)
+	{
+#if defined(_WIN32)
+		closesocket(m_udpSock);
+#else
+		close(m_udpSock);
+#endif
+		m_udpSock = INVALID_SOCKET;
 	}
 
 	if (m_serverThread.joinable())
@@ -76,10 +93,62 @@ void VideoStreamServer::Stop()
 bool VideoStreamServer::HasActiveClient() const
 {
 	std::lock_guard<std::mutex> lock(m_clientsMutex);
-	return !m_clientSockets.empty();
+	return !m_clients.empty();
 }
 
-void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uint8* data, size_t size)
+void VideoStreamServer::SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe)
+{
+	if (m_udpSock == INVALID_SOCKET)
+		return;
+
+	const uint32 frameId = m_frameId.fetch_add(1);
+	const uint32 packetCount = static_cast<uint32>((size + UDP_MAX_PAYLOAD - 1) / UDP_MAX_PAYLOAD);
+	uint8 header[UDP_HEADER_SIZE];
+	header[0] = static_cast<uint8>(UDP_MAGIC & 0xFF);
+	header[1] = static_cast<uint8>((UDP_MAGIC >> 8) & 0xFF);
+	header[2] = UDP_VERSION;
+
+	sockaddr_in dest = destAddr;
+	dest.sin_port = htons(m_port);
+
+	for (uint32 i = 0; i < packetCount; ++i)
+	{
+		const size_t offset = static_cast<size_t>(i) * UDP_MAX_PAYLOAD;
+		const size_t chunk = std::min(UDP_MAX_PAYLOAD, size - offset);
+		uint8 flags = 0;
+		if (i == 0)
+			flags |= UDP_FLAG_START;
+		if (i + 1 == packetCount)
+			flags |= UDP_FLAG_END;
+		if (isKeyframe)
+			flags |= UDP_FLAG_IDR;
+		header[3] = flags;
+
+		const uint32 seq = m_seq.fetch_add(1);
+		header[4] = static_cast<uint8>(frameId & 0xFF);
+		header[5] = static_cast<uint8>((frameId >> 8) & 0xFF);
+		header[6] = static_cast<uint8>((frameId >> 16) & 0xFF);
+		header[7] = static_cast<uint8>((frameId >> 24) & 0xFF);
+		header[8] = static_cast<uint8>(seq & 0xFF);
+		header[9] = static_cast<uint8>((seq >> 8) & 0xFF);
+		header[10] = static_cast<uint8>((seq >> 16) & 0xFF);
+		header[11] = static_cast<uint8>((seq >> 24) & 0xFF);
+		header[12] = static_cast<uint8>(i & 0xFF);
+		header[13] = static_cast<uint8>((i >> 8) & 0xFF);
+		header[14] = static_cast<uint8>(packetCount & 0xFF);
+		header[15] = static_cast<uint8>((packetCount >> 8) & 0xFF);
+		for (int b = 0; b < 8; ++b)
+			header[16 + b] = static_cast<uint8>((ptsUs >> (b * 8)) & 0xFF);
+
+		// Single stack buffer per datagram: portable and heap-free.
+		uint8 datagram[UDP_HEADER_SIZE + UDP_MAX_PAYLOAD];
+		memcpy(datagram, header, UDP_HEADER_SIZE);
+		memcpy(datagram + UDP_HEADER_SIZE, data + offset, chunk);
+		sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + chunk), 0, (sockaddr*)&dest, sizeof(dest));
+	}
+}
+
+void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe)
 {
 	if (!data || size == 0)
 		return;
@@ -105,9 +174,15 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 	packet.insert(packet.end(), data, data + size);
 
 	std::lock_guard<std::mutex> lock(m_clientsMutex);
-	for (auto it = m_clientSockets.begin(); it != m_clientSockets.end();)
+	for (auto it = m_clients.begin(); it != m_clients.end();)
 	{
-		uintptr_t s = *it;
+		if (it->useUdp)
+		{
+			SendUdpFrame(it->addr, ptsUs, data, size, isKeyframe);
+			++it;
+			continue;
+		}
+		uintptr_t s = it->socket;
 		int sent = send((SOCKET)s, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0);
 		if (sent <= 0)
 		{
@@ -117,7 +192,7 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 #else
 			close((int)s);
 #endif
-			it = m_clientSockets.erase(it);
+			it = m_clients.erase(it);
 		}
 		else
 		{
@@ -182,13 +257,18 @@ void VideoStreamServer::ServerThreadFunc()
 
 		{
 			std::lock_guard<std::mutex> lock(m_clientsMutex);
-			m_clientSockets.push_back((uintptr_t)clientSock);
+			ClientInfo info{};
+			info.socket = (uintptr_t)clientSock;
+			info.addr = clientAddr;
+			info.useUdp = false;
+			m_clients.push_back(info);
 		}
 
 		// Request an immediate keyframe so the client can begin decoding right away
 		StreamingCapture::GetInstance().RequestKeyframe();
 
-		// Spawn thread to listen for reverse control packets (e.g. IDR_REQUEST = 0x10)
+		// Spawn thread to listen for reverse control packets
+		// (IDR_REQUEST = 0x10, TRANSPORT_UDP = 0x11, TRANSPORT_TCP = 0x12)
 		m_rxThreads.emplace_back(&VideoStreamServer::ClientRxThreadFunc, this, (uintptr_t)clientSock);
 	}
 
@@ -206,10 +286,24 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 		if (bytesRead <= 0)
 			break;
 
-		if (opcode == 0x10)
+		if (opcode == OPCODE_IDR_REQUEST)
 		{
 			cemuLog_log(LogType::Force, "VideoStreamServer: Received IDR_REQUEST opcode (0x10) from Android client!");
 			StreamingCapture::GetInstance().RequestKeyframe();
+		}
+		else if (opcode == OPCODE_TRANSPORT_UDP || opcode == OPCODE_TRANSPORT_TCP)
+		{
+			const bool useUdp = (opcode == OPCODE_TRANSPORT_UDP);
+			std::lock_guard<std::mutex> lock(m_clientsMutex);
+			for (auto& client : m_clients)
+			{
+				if (client.socket == clientSocket)
+				{
+					client.useUdp = useUdp;
+					cemuLog_log(LogType::Force, "VideoStreamServer: Client switched to {} transport", useUdp ? "UDP" : "TCP");
+					break;
+				}
+			}
 		}
 	}
 }

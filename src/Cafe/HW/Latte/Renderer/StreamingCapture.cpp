@@ -118,6 +118,6 @@ void StreamingCapture::EncodeWorker()
 
 		m_h264Buffer.clear();
 		if (VideoEncoder::GetInstance().EncodeFrame(frame.pixels.data(), frame.width, frame.height, frame.pitch, frame.pixelFormat, frame.ptsUs, false, m_h264Buffer))
-			VideoStreamServer::GetInstance().BroadcastFrame(0x01, frame.ptsUs, m_h264Buffer.data(), m_h264Buffer.size());
+			VideoStreamServer::GetInstance().BroadcastFrame(0x01, frame.ptsUs, m_h264Buffer.data(), m_h264Buffer.size(), VideoEncoder::GetInstance().WasLastFrameKeyframe());
 	}
 }

@@ -29,6 +29,7 @@ public:
 
 	void RequestKeyframe();
 	bool IsInitialized() const { return m_isInitialized; }
+	bool WasLastFrameKeyframe() const { return m_lastFrameWasKeyframe; }
 
 private:
 	VideoEncoder();
@@ -44,6 +45,7 @@ private:
 
 	std::mutex m_encoderMutex;
 	bool m_forceKeyframeNext{ false };
+	bool m_lastFrameWasKeyframe{ false };
 
 	std::vector<uint8> m_nv12Buffer;
 
