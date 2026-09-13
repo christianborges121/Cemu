@@ -280,6 +280,16 @@ void VideoStreamServer::ServerThreadFunc()
 		int sndBuf = 1024 * 512;
 		setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, (const char*)&sndBuf, sizeof(sndBuf));
 
+		// Accepted sockets inherit SO_RCVTIMEO from listenSock on Windows.
+		// Reset receive timeout to 0 (infinite) so reverse control packets are not timed out.
+#if defined(_WIN32)
+		DWORD zeroTimeout = 0;
+		setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zeroTimeout, sizeof(zeroTimeout));
+#else
+		struct timeval zeroTimeout{};
+		setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zeroTimeout, sizeof(zeroTimeout));
+#endif
+
 		cemuLog_log(LogType::Force, "VideoStreamServer: Android client connected to video stream!");
 
 		{
@@ -311,7 +321,16 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 	{
 		int bytesRead = recv(s, reinterpret_cast<char*>(&opcode), 1, 0);
 		if (bytesRead <= 0)
+		{
+#if defined(_WIN32)
+			if (bytesRead < 0 && (WSAGetLastError() == WSAETIMEDOUT || WSAGetLastError() == WSAEWOULDBLOCK))
+				continue;
+#else
+			if (bytesRead < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+				continue;
+#endif
 			break;
+		}
 
 		if (opcode == OPCODE_IDR_REQUEST)
 		{
@@ -348,4 +367,9 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 			}
 		}
 	}
+#if defined(_WIN32)
+	closesocket(s);
+#else
+	close((int)s);
+#endif
 }
