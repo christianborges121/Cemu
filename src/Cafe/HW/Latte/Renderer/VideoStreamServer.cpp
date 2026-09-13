@@ -62,7 +62,8 @@ bool VideoStreamServer::Start(uint16 port)
 	}
 
 	m_serverThread = std::thread(&VideoStreamServer::ServerThreadFunc, this);
-	m_discoveryThread = std::thread(&VideoStreamServer::DiscoveryThreadFunc, this);
+	// Note: UDP 26763 discovery is owned by streaming/DiscoveryServer
+	// (Phase 4.0). The legacy discovery thread was retired to avoid double-bind.
 	cemuLog_log(LogType::Force, "VideoStreamServer: Started on TCP port {}", port);
 	return true;
 }
@@ -97,21 +98,8 @@ void VideoStreamServer::Stop()
 		m_udpSock = INVALID_SOCKET;
 	}
 
-	if (m_discoverySock != INVALID_SOCKET)
-	{
-#if defined(_WIN32)
-		closesocket(m_discoverySock);
-#else
-		close((int)m_discoverySock);
-#endif
-		m_discoverySock = INVALID_SOCKET;
-	}
-
 	if (m_serverThread.joinable())
 		m_serverThread.join();
-
-	if (m_discoveryThread.joinable())
-		m_discoveryThread.join();
 
 	for (auto& t : m_rxThreads)
 	{
@@ -558,67 +546,4 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 #endif
 }
 
-void VideoStreamServer::DiscoveryThreadFunc()
-{
-	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock == INVALID_SOCKET)
-	{
-		cemuLog_log(LogType::Force, "VideoStreamServer: Failed to create discovery socket");
-		return;
-	}
-
-	int opt = 1;
-	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-
-	sockaddr_in bindAddr{};
-	bindAddr.sin_family = AF_INET;
-	bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	bindAddr.sin_port = htons(DISCOVERY_PORT);
-
-	if (bind(sock, (sockaddr*)&bindAddr, sizeof(bindAddr)) == SOCKET_ERROR)
-	{
-		cemuLog_log(LogType::Force, "VideoStreamServer: Discovery bind failed on port {}", DISCOVERY_PORT);
-#if defined(_WIN32)
-		closesocket(sock);
-#else
-		close((int)sock);
-#endif
-		return;
-	}
-
-	// 500ms timeout so thread exits when m_isRunning becomes false
-	DWORD timeout = 500;
-	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-
-	m_discoverySock = sock;
-	cemuLog_log(LogType::Force, "VideoStreamServer: UDP discovery listening on port {}", DISCOVERY_PORT);
-
-	char hostName[128] = "Cemu-PC";
-	gethostname(hostName, sizeof(hostName));
-
-	char recvBuf[256];
-	while (m_isRunning)
-	{
-		sockaddr_in senderAddr{};
-		int senderLen = sizeof(senderAddr);
-		int r = recvfrom(sock, recvBuf, sizeof(recvBuf) - 1, 0, (sockaddr*)&senderAddr, &senderLen);
-		if (r <= 0)
-			continue;
-
-		recvBuf[r] = '\0';
-		if (strncmp(recvBuf, "CEMUPAD_DISCOVER", 16) == 0)
-		{
-			// Format: CEMUPAD_HERE:<hostname>:26760:26761:26762
-			std::string reply = fmt::format("CEMUPAD_HERE:{}:26760:{}:26762", hostName, m_port);
-			sendto(sock, reply.c_str(), static_cast<int>(reply.size()), 0, (sockaddr*)&senderAddr, senderLen);
-			cemuLog_log(LogType::Force, "VideoStreamServer: Responded to discovery from {}:{}", inet_ntoa(senderAddr.sin_addr), ntohs(senderAddr.sin_port));
-		}
-	}
-
-#if defined(_WIN32)
-	closesocket(sock);
-#else
-	close((int)sock);
-#endif
-	m_discoverySock = INVALID_SOCKET;
-}
+// Note: UDP discovery now lives in streaming/DiscoveryServer (Phase 4.0).

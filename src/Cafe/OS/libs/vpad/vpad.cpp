@@ -6,6 +6,7 @@
 #include "config/ActiveSettings.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
 #include "input/InputManager.h"
+#include "streaming/CemuPadBridge.h"
 #include "WindowSystem.h"
 
 #ifdef PUBLIC_RELASE
@@ -871,6 +872,7 @@ void vpadExport_VPADControlMotor(PPCInterpreter_t* hCPU)
 		if (length == 0)
 		{
 			controller->clear_rumble();
+			CemuPadBridge::GetInstance().OnVPADClearRumble((uint8)channel);
 		}
 		else
 		{
@@ -880,6 +882,7 @@ void vpadExport_VPADControlMotor(PPCInterpreter_t* hCPU)
 				osLib_returnFromFunction(hCPU, -1); // TODO P: not sure about the exact return value
 				return;
 			}
+			CemuPadBridge::GetInstance().OnVPADRumble((uint8)channel, pattern, length);
 		}
 	}
 
@@ -895,6 +898,8 @@ void vpadExport_VPADStopMotor(PPCInterpreter_t* hCPU)
 	{
 		controller->clear_rumble();
 	}
+
+	CemuPadBridge::GetInstance().OnVPADClearRumble((uint8)channel);
 
 	osLib_returnFromFunction(hCPU, 0);
 }

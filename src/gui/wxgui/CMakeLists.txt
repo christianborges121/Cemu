@@ -70,6 +70,8 @@ add_library(CemuWxGui STATIC
   helpers/wxWayland.h
   input/HotkeySettings.cpp
   input/HotkeySettings.h
+  input/CemuPadPairingDialog.cpp
+  input/CemuPadPairingDialog.h
   input/InputAPIAddWindow.cpp
   input/InputAPIAddWindow.h
   input/InputSettings2.cpp

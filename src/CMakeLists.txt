@@ -63,6 +63,7 @@ add_subdirectory(audio)
 add_subdirectory(util)
 add_subdirectory(imgui)
 add_subdirectory(resource)
+add_subdirectory(streaming)
 
 add_executable(CemuBin
 	main.cpp
@@ -214,6 +215,7 @@ target_link_libraries(CemuBin PRIVATE
 	CemuConfig
 	CemuGui
 	CemuInput
+	CemuStreaming
 	CemuUtil
 )
 

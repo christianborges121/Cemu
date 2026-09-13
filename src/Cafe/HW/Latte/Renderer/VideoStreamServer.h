@@ -43,7 +43,6 @@ public:
 
 	// Ports
 	static constexpr uint16 AUDIO_PORT = 26762;
-	static constexpr uint16 DISCOVERY_PORT = 26763;
 
 	// UDP video datagram protocol v1 (all multi-byte little-endian)
 	static constexpr uint16 UDP_MAGIC = 0x5043; // 'C','P'
@@ -59,7 +58,6 @@ private:
 	~VideoStreamServer();
 
 	void ServerThreadFunc();
-	void DiscoveryThreadFunc();
 	void ClientRxThreadFunc(uintptr_t clientSocket);
 	void PruneFinishedRxThreads();
 	void SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe);
@@ -76,11 +74,9 @@ private:
 	uint16 m_port{ 26761 };
 
 	std::thread m_serverThread;
-	std::thread m_discoveryThread;
 	std::vector<std::thread> m_rxThreads;
 
 	SOCKET m_udpSock{ INVALID_SOCKET };
-	SOCKET m_discoverySock{ INVALID_SOCKET };
 	std::atomic<uint32> m_frameId{ 0 };
 	std::atomic<uint32> m_seq{ 0 };
 	std::atomic<uint32> m_audioSeq{ 0 };

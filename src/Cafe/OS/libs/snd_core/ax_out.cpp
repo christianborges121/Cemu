@@ -4,6 +4,7 @@
 #include "audio/IAudioAPI.h"
 #include "config/CemuConfig.h"
 #include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
+#include "streaming/CemuPadBridge.h"
 
 namespace snd_core
 {
@@ -339,6 +340,7 @@ namespace snd_core
 				g_padAudio->FeedBlock(tempDRCChannelData);
 
 			VideoStreamServer::GetInstance().BroadcastAudio(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * outChannels * sizeof(sint16));
+			CemuPadBridge::GetInstance().OnAudioDMA(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * outChannels * sizeof(sint16));
 
 			tempDRCAudioBlockCounter = 0;
 		}

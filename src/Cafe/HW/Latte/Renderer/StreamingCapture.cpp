@@ -2,6 +2,7 @@
 #include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
 #include "Cafe/HW/Latte/Renderer/VideoEncoder.h"
 #include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
+#include "streaming/CemuPadBridge.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteTextureView.h"
 #include "Cemu/Logging/CemuLogging.h"
@@ -79,11 +80,14 @@ void StreamingCapture::ProcessFramePixels(const uint8* pixels, uint32 width, uin
 		return;
 
 	auto now = std::chrono::steady_clock::now();
+	const uint64 ptsUs = static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(now - m_startTime).count());
+	// Non-invasive delegate: no-op until a frame handler is registered (Phase 4.0 follow-up).
+	CemuPadBridge::GetInstance().OnGamepadFrame(pixels, width, height, ptsUs);
 	CapturedFrame frame;
 	frame.width = width;
 	frame.height = height;
 	frame.pitch = pitch;
-	frame.ptsUs = static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(now - m_startTime).count());
+	frame.ptsUs = ptsUs;
 	frame.pixelFormat = pixelFormat;
 	frame.pixels.resize(static_cast<size_t>(pitch) * height);
 	for (uint32 y = 0; y < height; ++y)
