@@ -25,6 +25,9 @@ public:
 	bool Initialize(uint32 width = 854, uint32 height = 480, uint32 fps = 60, uint32 bitrate = 6000000);
 	void Shutdown();
 
+	using FrameOutputCallback = std::function<void(const uint8* data, size_t size, uint64 ptsUs, bool isKeyframe)>;
+
+	bool EncodeFrame(const uint8* pixels, uint32 width, uint32 height, uint32 pitch, StreamingPixelFormat pixelFormat, uint64 ptsUs, bool forceKeyframe, const FrameOutputCallback& onFrameOutput);
 	bool EncodeFrame(const uint8* pixels, uint32 width, uint32 height, uint32 pitch, StreamingPixelFormat pixelFormat, uint64 ptsUs, bool forceKeyframe, std::vector<uint8>& outH264);
 
 	void RequestKeyframe();

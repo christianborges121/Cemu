@@ -121,17 +121,18 @@ void StreamingCapture::EncodeWorker()
 		if (!IsStreamingActive())
 			continue;
 
-		m_h264Buffer.clear();
-		if (VideoEncoder::GetInstance().EncodeFrame(frame.pixels.data(), frame.width, frame.height, frame.pitch, frame.pixelFormat, frame.ptsUs, false, m_h264Buffer))
-		{
-			VideoStreamServer::GetInstance().BroadcastFrame(0x01, frame.ptsUs, m_h264Buffer.data(), m_h264Buffer.size(), VideoEncoder::GetInstance().WasLastFrameKeyframe());
-		}
-		else
+		bool encodedAny = VideoEncoder::GetInstance().EncodeFrame(
+			frame.pixels.data(), frame.width, frame.height, frame.pitch, frame.pixelFormat, frame.ptsUs, false,
+			[](const uint8* data, size_t size, uint64 ptsUs, bool isKeyframe) {
+				VideoStreamServer::GetInstance().BroadcastFrame(0x01, ptsUs, data, size, isKeyframe);
+			}
+		);
+		if (!encodedAny)
 		{
 			static uint32 s_encodeFailures = 0;
 			if (++s_encodeFailures % 60 == 0)
 			{
-				cemuLog_log(LogType::Force, "StreamingCapture: EncodeFrame failed (total failures={})", s_encodeFailures);
+				cemuLog_log(LogType::Force, "StreamingCapture: EncodeFrame produced no output (total={})", s_encodeFailures);
 			}
 		}
 	}

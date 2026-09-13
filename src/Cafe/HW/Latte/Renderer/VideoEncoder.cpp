@@ -185,14 +185,24 @@ bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bi
 		var.ulVal = m_bitrate;
 		m_pCodecAPI->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
 
-		// Quality vs Speed: 100 (fastest / lowest latency)
+		// Quality vs Speed: 60 (balanced high-motion quality with low latency)
 		var.vt = VT_UI4;
-		var.ulVal = 100;
+		var.ulVal = 60;
 		m_pCodecAPI->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &var);
 
-		// GOP Size: keyframe every 2 seconds (120 frames at 60 FPS)
+		// Explicitly disable B-pictures for real-time low-latency forward-only streaming
 		var.vt = VT_UI4;
-		var.ulVal = m_fps * 2;
+		var.ulVal = 0;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &var);
+
+		// Enable CABAC entropy encoding for higher compression efficiency during motion
+		var.vt = VT_BOOL;
+		var.boolVal = VARIANT_TRUE;
+		m_pCodecAPI->SetValue(&CODECAPI_AVEncH264CABACEnable, &var);
+
+		// GOP Size: keyframe every 1 second (60 frames at 60 FPS) for fast packet loss recovery
+		var.vt = VT_UI4;
+		var.ulVal = m_fps;
 		m_pCodecAPI->SetValue(&CODECAPI_AVEncMPVGOPSize, &var);
 
 		VariantClear(&var);
@@ -376,7 +386,7 @@ void VideoEncoder::ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint3
 	}
 }
 
-bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height, uint32 pitch, StreamingPixelFormat pixelFormat, uint64 ptsUs, bool forceKeyframe, std::vector<uint8>& outH264)
+bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height, uint32 pitch, StreamingPixelFormat pixelFormat, uint64 ptsUs, bool forceKeyframe, const FrameOutputCallback& onFrameOutput)
 {
 	std::lock_guard<std::mutex> lock(m_encoderMutex);
 
@@ -386,6 +396,90 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 #if defined(_WIN32)
 	if (!m_pTransform)
 		return false;
+
+	// Helper lambda to drain one sample and pass to onFrameOutput
+	auto drainOneSample = [this, &onFrameOutput, ptsUs](bool keyframeRequested) -> bool {
+		MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
+		DWORD status = 0;
+		IMFMediaBuffer* pOutBuffer = nullptr;
+		MFCreateMemoryBuffer(m_outBufferSize, &pOutBuffer);
+		IMFSample* pOutSample = nullptr;
+		MFCreateSample(&pOutSample);
+		pOutSample->AddBuffer(pOutBuffer);
+		outputDataBuffer.pSample = pOutSample;
+		outputDataBuffer.dwStreamID = m_outStreamId;
+
+		HRESULT hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+		bool gotOutput = false;
+		if (SUCCEEDED(hr) && outputDataBuffer.pSample)
+		{
+			LONGLONG sampleTimeHns = 0;
+			uint64 framePtsUs = ptsUs;
+			if (SUCCEEDED(outputDataBuffer.pSample->GetSampleTime(&sampleTimeHns)) && sampleTimeHns > 0)
+			{
+				framePtsUs = static_cast<uint64>(sampleTimeHns) / 10;
+			}
+
+			UINT32 isCleanPoint = 0;
+			outputDataBuffer.pSample->GetUINT32(MFSampleExtension_CleanPoint, &isCleanPoint);
+
+			IMFMediaBuffer* pMediaBuffer = nullptr;
+			outputDataBuffer.pSample->ConvertToContiguousBuffer(&pMediaBuffer);
+			if (pMediaBuffer)
+			{
+				BYTE* pBytes = nullptr;
+				DWORD curLen = 0;
+				pMediaBuffer->Lock(&pBytes, nullptr, &curLen);
+				if (pBytes && curLen > 0)
+				{
+					bool hasIdr = (isCleanPoint != 0);
+					if (!hasIdr && keyframeRequested)
+					{
+						const size_t scanLimit = std::min((size_t)curLen, (size_t)128);
+						for (size_t i = 0; i + 4 < scanLimit; ++i)
+						{
+							if (pBytes[i] == 0 && pBytes[i + 1] == 0)
+							{
+								size_t offset = 0;
+								if (pBytes[i + 2] == 1)
+									offset = i + 3;
+								else if (pBytes[i + 2] == 0 && pBytes[i + 3] == 1)
+									offset = i + 4;
+
+								if (offset != 0 && offset < scanLimit)
+								{
+									uint8 nalType = pBytes[offset] & 0x1F;
+									if (nalType == 5 || nalType == 7)
+									{
+										hasIdr = true;
+										break;
+									}
+								}
+							}
+						}
+					}
+
+					m_lastFrameWasKeyframe = hasIdr;
+					if (hasIdr)
+						m_forceKeyframeNext = false;
+
+					if (onFrameOutput)
+					{
+						onFrameOutput(pBytes, curLen, framePtsUs, hasIdr);
+					}
+					gotOutput = true;
+				}
+				pMediaBuffer->Unlock();
+				pMediaBuffer->Release();
+			}
+		}
+
+		if (outputDataBuffer.pEvents)
+			outputDataBuffer.pEvents->Release();
+		pOutBuffer->Release();
+		pOutSample->Release();
+		return gotOutput;
+	};
 
 	// Convert normalized RGBA/BGRA/packed 10-bit pixels to NV12
 	uint8* yPlane = m_nv12Buffer.data();
@@ -404,50 +498,15 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 		VariantClear(&var);
 	}
 
-	// ---- DRAIN-BEFORE-INPUT: pull any pending encoded frame before pushing new input ----
-	// This prevents MF_E_NOTACCEPTING entirely (the MFT's input buffer is always free)
-	// and eliminates the old drain path that silently discarded encoded frames.
+	bool emittedAny = false;
+
+	// 1. Drain any pending output before pushing new input to guarantee unblocked input
+	while (drainOneSample(shouldForceKeyframe))
 	{
-		MFT_OUTPUT_DATA_BUFFER preDrainBuf{};
-		DWORD preDrainStatus = 0;
-		IMFMediaBuffer* pPreBuf = nullptr;
-		MFCreateMemoryBuffer(m_outBufferSize, &pPreBuf);
-		IMFSample* pPreSample = nullptr;
-		MFCreateSample(&pPreSample);
-		pPreSample->AddBuffer(pPreBuf);
-		preDrainBuf.pSample = pPreSample;
-		preDrainBuf.dwStreamID = m_outStreamId;
-		HRESULT preDrainHr = m_pTransform->ProcessOutput(0, 1, &preDrainBuf, &preDrainStatus);
-		if (SUCCEEDED(preDrainHr) && preDrainBuf.pSample)
-		{
-			// A previous frame was sitting in the MFT output. Extract and emit it
-			// so we don't silently discard encoded data (the old drain bug).
-			UINT32 preClean = 0;
-			preDrainBuf.pSample->GetUINT32(MFSampleExtension_CleanPoint, &preClean);
-			IMFMediaBuffer* pPreMedia = nullptr;
-			preDrainBuf.pSample->ConvertToContiguousBuffer(&pPreMedia);
-			if (pPreMedia)
-			{
-				BYTE* pPreBytes = nullptr;
-				DWORD preLen = 0;
-				pPreMedia->Lock(&pPreBytes, nullptr, &preLen);
-				if (pPreBytes && preLen > 0)
-				{
-					outH264.assign(pPreBytes, pPreBytes + preLen);
-					m_lastFrameWasKeyframe = (preClean != 0);
-					if (m_lastFrameWasKeyframe)
-						m_forceKeyframeNext = false;
-				}
-				pPreMedia->Unlock();
-				pPreMedia->Release();
-			}
-		}
-		if (preDrainBuf.pEvents) preDrainBuf.pEvents->Release();
-		pPreBuf->Release();
-		pPreSample->Release();
+		emittedAny = true;
 	}
 
-	// Create input Media Sample
+	// 2. Create input Media Sample and push
 	IMFMediaBuffer* pInputBuffer = nullptr;
 	DWORD bufSize = static_cast<DWORD>(m_nv12Buffer.size());
 	MFCreateMemoryBuffer(bufSize, &pInputBuffer);
@@ -469,7 +528,6 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	}
 
 	HRESULT hr = m_pTransform->ProcessInput(m_inStreamId, pInputSample, 0);
-
 	pInputBuffer->Release();
 	pInputSample->Release();
 
@@ -478,89 +536,26 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 		static uint32 s_inputFailCount = 0;
 		if (++s_inputFailCount % 60 == 0)
 			cemuLog_log(LogType::Force, "VideoEncoder: ProcessInput failed (hr=0x{:08X}, count={})", (uint32)hr, s_inputFailCount);
-		return !outH264.empty(); // may still have the pre-drained frame
+		return emittedAny;
 	}
 
-	// Drain output — the frame we just pushed (or the one before it, pipelined)
-	MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
-	DWORD status = 0;
-
-	IMFMediaBuffer* pOutBuffer = nullptr;
-	MFCreateMemoryBuffer(m_outBufferSize, &pOutBuffer);
-	IMFSample* pOutSample = nullptr;
-	MFCreateSample(&pOutSample);
-	pOutSample->AddBuffer(pOutBuffer);
-
-	outputDataBuffer.pSample = pOutSample;
-	outputDataBuffer.dwStreamID = m_outStreamId;
-
-	hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-	if (SUCCEEDED(hr) && outputDataBuffer.pSample)
+	// 3. Drain output produced by this input
+	while (drainOneSample(shouldForceKeyframe))
 	{
-		UINT32 isCleanPoint = 0;
-		outputDataBuffer.pSample->GetUINT32(MFSampleExtension_CleanPoint, &isCleanPoint);
-
-		IMFMediaBuffer* pMediaBuffer = nullptr;
-		outputDataBuffer.pSample->ConvertToContiguousBuffer(&pMediaBuffer);
-		if (pMediaBuffer)
-		{
-			BYTE* pBytes = nullptr;
-			DWORD curLen = 0;
-			pMediaBuffer->Lock(&pBytes, nullptr, &curLen);
-			if (pBytes && curLen > 0)
-			{
-				outH264.assign(pBytes, pBytes + curLen);
-
-				// Determine keyframe status: trust MFSampleExtension_CleanPoint first.
-				// Only scan NAL headers when we specifically requested a keyframe
-				// (to confirm it was actually produced), and limit to the first 128
-				// bytes where SPS/PPS/IDR NAL start codes always appear.
-				bool hasIdr = (isCleanPoint != 0);
-				if (!hasIdr && shouldForceKeyframe)
-				{
-					const size_t scanLimit = std::min((size_t)curLen, (size_t)128);
-					for (size_t i = 0; i + 4 < scanLimit; ++i)
-					{
-						if (pBytes[i] == 0 && pBytes[i + 1] == 0)
-						{
-							size_t offset = 0;
-							if (pBytes[i + 2] == 1)
-								offset = i + 3;
-							else if (pBytes[i + 2] == 0 && pBytes[i + 3] == 1)
-								offset = i + 4;
-
-							if (offset != 0 && offset < scanLimit)
-							{
-								uint8 nalType = pBytes[offset] & 0x1F;
-								if (nalType == 5 || nalType == 7)
-								{
-									hasIdr = true;
-									break;
-								}
-							}
-						}
-					}
-				}
-
-				m_lastFrameWasKeyframe = hasIdr;
-				if (hasIdr)
-				{
-					m_forceKeyframeNext = false;
-				}
-			}
-			pMediaBuffer->Unlock();
-			pMediaBuffer->Release();
-		}
+		emittedAny = true;
 	}
 
-	if (outputDataBuffer.pEvents)
-		outputDataBuffer.pEvents->Release();
-
-	pOutBuffer->Release();
-	pOutSample->Release();
-
-	return !outH264.empty();
+	return emittedAny;
 #else
 	return false;
 #endif
+}
+
+bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height, uint32 pitch, StreamingPixelFormat pixelFormat, uint64 ptsUs, bool forceKeyframe, std::vector<uint8>& outH264)
+{
+	outH264.clear();
+	return EncodeFrame(pixels, width, height, pitch, pixelFormat, ptsUs, forceKeyframe,
+		[&outH264](const uint8* data, size_t size, uint64 pts, bool isKeyframe) {
+			outH264.assign(data, data + size);
+		});
 }
