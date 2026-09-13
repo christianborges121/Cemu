@@ -309,11 +309,27 @@ namespace snd_core
 
 		std::shared_lock lock(g_audioMutex);
 
-		const uint32 channels = g_padAudio ? g_padAudio->GetChannels() : AX_DRC_CHANNEL_COUNT;
-		sint16* outputChannel = tempDRCChannelData + AX_SAMPLES_PER_3MS_48KHZ * tempDRCAudioBlockCounter * channels;
-		for (sint32 i = 0; i < sampleCount; ++i)
+		// Wii U GamePad (DRC) is always 2-channel 48 kHz stereo (Left + Right)
+		const uint32 inChannels = sampleCount / AX_SAMPLES_PER_3MS_48KHZ;
+		const uint32 outChannels = 2;
+		sint16* outputChannel = tempDRCChannelData + AX_SAMPLES_PER_3MS_48KHZ * tempDRCAudioBlockCounter * outChannels;
+
+		if (inChannels >= 2)
 		{
-			outputChannel[i] = _swapEndianS16(sampleData[i]);
+			for (sint32 i = 0; i < AX_SAMPLES_PER_3MS_48KHZ; ++i)
+			{
+				outputChannel[i * 2 + 0] = _swapEndianS16(sampleData[i * inChannels + 0]);
+				outputChannel[i * 2 + 1] = _swapEndianS16(sampleData[i * inChannels + 1]);
+			}
+		}
+		else
+		{
+			for (sint32 i = 0; i < AX_SAMPLES_PER_3MS_48KHZ; ++i)
+			{
+				sint16 mono = _swapEndianS16(sampleData[i]);
+				outputChannel[i * 2 + 0] = mono;
+				outputChannel[i * 2 + 1] = mono;
+			}
 		}
 
 		tempDRCAudioBlockCounter++;
@@ -322,7 +338,7 @@ namespace snd_core
 			if (g_padAudio)
 				g_padAudio->FeedBlock(tempDRCChannelData);
 
-			VideoStreamServer::GetInstance().BroadcastAudio(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * channels * sizeof(sint16));
+			VideoStreamServer::GetInstance().BroadcastAudio(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * outChannels * sizeof(sint16));
 
 			tempDRCAudioBlockCounter = 0;
 		}
@@ -357,7 +373,7 @@ namespace snd_core
 			}
 			AIInitDRCDMA(__AXDRCDMABuffers[frameIndex], numSamples * 6 * sizeof(sint16)); // 6ch output
 		}
-		else if (__AXMode[AX_DEV_DRC] == AX_MODE_STEREO)
+		else if (__AXMode[AX_DEV_DRC] == AX_MODE_STEREO || __AXMode[AX_DEV_DRC] == AX_MODE_SURROUND)
 		{
 			sint32* inputChannel0 = __AXDRCBuffer48.GetPtr() + numSamples * 0;
 			sint32* inputChannel1 = __AXDRCBuffer48.GetPtr() + numSamples * 1;
