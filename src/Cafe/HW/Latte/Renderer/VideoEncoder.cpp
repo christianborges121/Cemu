@@ -393,8 +393,8 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	ConvertRGBAToNV12(pixels, width, height, pitch, pixelFormat, yPlane, uvPlane);
 
 	// Force keyframe if requested
-	m_lastFrameWasKeyframe = (forceKeyframe || m_forceKeyframeNext) && (m_pCodecAPI != nullptr);
-	if (m_lastFrameWasKeyframe)
+	const bool shouldForceKeyframe = (forceKeyframe || m_forceKeyframeNext);
+	if (shouldForceKeyframe && m_pCodecAPI)
 	{
 		VARIANT var;
 		VariantInit(&var);
@@ -402,7 +402,6 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 		var.ulVal = 1;
 		m_pCodecAPI->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var);
 		VariantClear(&var);
-		m_forceKeyframeNext = false;
 	}
 
 	// Create input Media Sample
@@ -421,6 +420,10 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	pInputSample->AddBuffer(pInputBuffer);
 	pInputSample->SetSampleTime(ptsUs * 10); // 100ns units
 	pInputSample->SetSampleDuration(10000000 / m_fps);
+	if (shouldForceKeyframe)
+	{
+		pInputSample->SetUINT32(MFSampleExtension_CleanPoint, 1);
+	}
 
 	HRESULT hr = m_pTransform->ProcessInput(m_inStreamId, pInputSample, 0);
 
@@ -446,6 +449,9 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
 	if (SUCCEEDED(hr) && outputDataBuffer.pSample)
 	{
+		UINT32 isCleanPoint = 0;
+		outputDataBuffer.pSample->GetUINT32(MFSampleExtension_CleanPoint, &isCleanPoint);
+
 		IMFMediaBuffer* pMediaBuffer = nullptr;
 		outputDataBuffer.pSample->ConvertToContiguousBuffer(&pMediaBuffer);
 		if (pMediaBuffer)
@@ -456,6 +462,39 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 			if (pBytes && curLen > 0)
 			{
 				outH264.assign(pBytes, pBytes + curLen);
+
+				// Inspect H.264 Annex B stream for SPS (7) or IDR slice (5) to accurately identify keyframes
+				bool hasIdr = (isCleanPoint != 0);
+				if (!hasIdr)
+				{
+					for (size_t i = 0; i + 4 < curLen; ++i)
+					{
+						if (pBytes[i] == 0 && pBytes[i + 1] == 0)
+						{
+							size_t offset = 0;
+							if (pBytes[i + 2] == 1)
+								offset = i + 3;
+							else if (pBytes[i + 2] == 0 && pBytes[i + 3] == 1)
+								offset = i + 4;
+
+							if (offset != 0 && offset < curLen)
+							{
+								uint8 nalType = pBytes[offset] & 0x1F;
+								if (nalType == 5 || nalType == 7)
+								{
+									hasIdr = true;
+									break;
+								}
+							}
+						}
+					}
+				}
+
+				m_lastFrameWasKeyframe = hasIdr;
+				if (hasIdr)
+				{
+					m_forceKeyframeNext = false;
+				}
 			}
 			pMediaBuffer->Unlock();
 			pMediaBuffer->Release();

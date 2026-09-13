@@ -520,6 +520,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 					break;
 				}
 			}
+			StreamingCapture::GetInstance().RequestKeyframe();
 		}
 		else if (opcode == OPCODE_MIC_BLOW)
 		{

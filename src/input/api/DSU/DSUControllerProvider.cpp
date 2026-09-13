@@ -352,18 +352,18 @@ void DSUControllerProvider::reader_thread()
 		case MessageType::Data:
 			{
 				const auto rsp = (DataResponse*)msg;
+				static uint32 s_invalidCrcCount = 0;
 				if (!rsp->IsValid())
 				{
-#ifdef DEBUG_DSU_CLIENT
-				printf(" DSUControllerProvider::ReaderThread: DataResponse is invalid!\n");
-#endif
+					if (++s_invalidCrcCount % 100 == 1)
+						cemuLog_log(LogType::Force, "DSU: DataResponse CRC invalid (packet size={}, count={})", len, s_invalidCrcCount);
 					continue;
 				}
 
 				index = rsp->GetIndex();
 				cemu_assert(index < kMaxClients);
 #ifdef DEBUG_DSU_CLIENT
-			printf(" DSUControllerProvider::ReaderThread: received DataResponse for index %d\n", index);
+				printf(" DSUControllerProvider::ReaderThread: received DataResponse for index %d\n", index);
 #endif
 
 				auto& mutex = m_mutex[index];
