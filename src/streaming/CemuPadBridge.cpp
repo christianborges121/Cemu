@@ -17,7 +17,8 @@ void CemuPadBridge::Initialize()
 {
 	DiscoveryServer::GetInstance().Start(DiscoveryServer::kDefaultPort);
 	m_isActive = true;
-	cemuLog_log(LogType::Force, "CemuPadBridge: Subsystem initialized");
+	cemuLog_log(LogType::Force, "CemuPadBridge: Subsystem initialized (session PIN {})",
+		m_requirePin.load() ? "required" : "not required");
 }
 
 void CemuPadBridge::Shutdown()
@@ -279,4 +280,80 @@ void CemuPadBridge::ClearMicQueue()
 {
 	std::lock_guard<std::mutex> lock(m_micMutex);
 	m_micQueue.clear();
+}
+
+bool CemuPadBridge::IsPinRequired() const
+{
+	return m_requirePin.load();
+}
+
+void CemuPadBridge::SetRequirePin(bool required)
+{
+	if (required && m_currentPin.load() == 0)
+		RegeneratePin();
+	m_requirePin.store(required);
+	cemuLog_log(LogType::Force, "CemuPadBridge: Session PIN {}",
+		required ? fmt::format("required (PIN {:04d})", m_currentPin.load()) : "not required");
+}
+
+uint32_t CemuPadBridge::GetCurrentPin() const
+{
+	return m_currentPin.load();
+}
+
+uint32_t CemuPadBridge::RegeneratePin()
+{
+	std::uniform_int_distribution<uint32_t> dist(1000, 9999);
+	const uint32_t pin = dist(m_tokenRng);
+	m_currentPin.store(pin);
+	return pin;
+}
+
+bool CemuPadBridge::Authenticate(uint64_t credential, uint64_t& outToken)
+{
+	outToken = 0;
+
+	auto issueToken = [&]() -> uint64_t {
+		uint64_t token;
+		{
+			std::lock_guard<std::mutex> lock(m_tokenMutex);
+			do
+			{
+				token = m_tokenRng();
+			} while (token == 0);
+			m_sessionTokens.push_back(token);
+			while (m_sessionTokens.size() > kMaxSessionTokens)
+				m_sessionTokens.erase(m_sessionTokens.begin());
+		}
+		return token;
+	};
+
+	// Open session (PIN disabled): approve anything, including the initial
+	// zero credential, and hand out a token so remembered devices stay
+	// paired if PIN protection is enabled later.
+	if (!m_requirePin.load())
+	{
+		outToken = issueToken();
+		return true;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(m_tokenMutex);
+		for (uint64_t token : m_sessionTokens)
+		{
+			if (token != 0 && token == credential)
+			{
+				outToken = token;
+				return true;
+			}
+		}
+	}
+
+	// Fresh pairing while required: accept the current 4-digit PIN.
+	if (credential != 0 && credential == m_currentPin.load())
+	{
+		outToken = issueToken();
+		return true;
+	}
+	return false;
 }

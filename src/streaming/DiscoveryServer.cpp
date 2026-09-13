@@ -19,7 +19,7 @@
 
 namespace
 {
-	constexpr std::chrono::seconds kDeviceExpiry{10};
+	constexpr std::chrono::seconds kDeviceExpiry{30};
 	constexpr const char* kBeaconDiscover = "CEMUPAD_DISCOVER";
 	constexpr const char* kBeaconHerePrefix = "CEMUPAD_HERE:";
 	constexpr const char* kProbeMessage = "CEMU_DISCOVER";

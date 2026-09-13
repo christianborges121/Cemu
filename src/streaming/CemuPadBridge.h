@@ -18,7 +18,9 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <random>
 #include <string>
+#include <vector>
 
 class CemuPadBridge
 {
@@ -68,6 +70,18 @@ public:
 	size_t DequeueMicSamples(int16_t* outSamples, size_t maxSamples);
 	void ClearMicQueue();
 
+	// Session PIN security (Phase 4.4, default OFF = stock behavior).
+	// When required, TCP video clients must authenticate with the 4-digit PIN
+	// or a previously issued token before receiving any media. Remembered
+	// tokens stay valid so paired phones reconnect without re-prompting.
+	bool IsPinRequired() const;
+	void SetRequirePin(bool required);
+	uint32_t GetCurrentPin() const;
+	uint32_t RegeneratePin();
+	// Validates a credential (PIN or remembered token). On success writes a
+	// fresh session token to outToken (cache it client-side for reconnects).
+	bool Authenticate(uint64_t credential, uint64_t& outToken);
+
 private:
 	CemuPadBridge() = default;
 	~CemuPadBridge() = default;
@@ -88,4 +102,11 @@ private:
 	static constexpr size_t kMicQueueCapSamples = 32000; // 1 second at 32 kHz
 	mutable std::mutex m_micMutex;
 	std::deque<int16_t> m_micQueue;
+
+	static constexpr size_t kMaxSessionTokens = 8;
+	std::atomic<bool> m_requirePin{false};
+	std::atomic<uint32_t> m_currentPin{0};
+	mutable std::mutex m_tokenMutex;
+	std::vector<uint64_t> m_sessionTokens;
+	std::mt19937_64 m_tokenRng{std::random_device{}()};
 };

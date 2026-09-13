@@ -30,6 +30,7 @@ private:
 	wxButton* m_rescanButton{nullptr};
 	wxStaticText* m_statusText{nullptr};
 	wxTimer m_pollTimer;
+	int m_pollTicks{0};
 
 	struct DeviceEntry
 	{

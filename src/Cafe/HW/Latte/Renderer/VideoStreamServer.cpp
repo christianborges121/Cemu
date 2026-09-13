@@ -219,6 +219,9 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 	std::vector<uintptr_t> failedSockets;
 	for (auto& client : clientSnapshot)
 	{
+		// Session security: never stream media to unauthenticated clients.
+		if (!client.authorized)
+			continue;
 		if (client.useUdp)
 		{
 			SendUdpFrame(client.addr, ptsUs, data, size, isKeyframe);
@@ -303,6 +306,8 @@ void VideoStreamServer::BroadcastRumble(bool active, uint8 intensity, uint16 dur
 
 	for (auto& client : clientSnapshot)
 	{
+		if (!client.authorized)
+			continue;
 		send((SOCKET)client.socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0);
 	}
 
@@ -323,6 +328,8 @@ void VideoStreamServer::BroadcastAudio(const void* data, size_t size)
 			return;
 		for (const auto& c : m_clients)
 		{
+			if (!c.authorized)
+				continue;
 			sockaddr_in target = c.addr;
 			target.sin_port = htons(AUDIO_PORT);
 			targets.push_back(target);
@@ -465,6 +472,9 @@ void VideoStreamServer::ServerThreadFunc()
 			info.socket = (uintptr_t)clientSock;
 			info.addr = clientAddr;
 			info.useUdp = false;
+			// PIN disabled (default): clients stream immediately. Otherwise
+			// they stay muted until OPCODE_AUTH_REQUEST succeeds.
+			info.authorized = !CemuPadBridge::GetInstance().IsPinRequired();
 			m_clients.push_back(info);
 		}
 
@@ -477,6 +487,19 @@ void VideoStreamServer::ServerThreadFunc()
 	}
 
 	closesocket(listenSock);
+}
+
+void VideoStreamServer::SetClientAuthorized(uintptr_t clientSocket, bool authorized)
+{
+	std::lock_guard<std::mutex> lock(m_clientsMutex);
+	for (auto& client : m_clients)
+	{
+		if (client.socket == clientSocket)
+		{
+			client.authorized = authorized;
+			break;
+		}
+	}
 }
 
 void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
@@ -512,10 +535,69 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 			break;
 		}
 
+		// Session security gate: unauthorized clients only progress via
+		// OPCODE_AUTH_REQUEST. Other opcodes are consumed and ignored so the
+		// TCP stream stays aligned (fail-closed when the entry is missing).
+		bool authorized = false;
+		{
+			std::lock_guard<std::mutex> lock(m_clientsMutex);
+			for (const auto& client : m_clients)
+			{
+				if (client.socket == clientSocket)
+				{
+					authorized = client.authorized;
+					break;
+				}
+			}
+		}
+		if (!authorized && opcode != OPCODE_AUTH_REQUEST)
+		{
+			if (opcode == OPCODE_MIC_BLOW)
+			{
+				uint8 ignored = 0;
+				recv(s, reinterpret_cast<char*>(&ignored), 1, 0);
+			}
+			else if (opcode == OPCODE_SET_BITRATE || opcode == OPCODE_SET_RESOLUTION)
+			{
+				uint8 ignored[4]{};
+				if (!readExact(ignored, sizeof(ignored)))
+					break;
+			}
+			continue;
+		}
+
 		if (opcode == OPCODE_IDR_REQUEST)
 		{
 			cemuLog_log(LogType::Force, "VideoStreamServer: Received IDR_REQUEST opcode (0x10) from Android client!");
 			StreamingCapture::GetInstance().RequestKeyframe();
+		}
+		else if (opcode == OPCODE_AUTH_REQUEST)
+		{
+			// Authenticated at any time: lets phones rotate tokens proactively.
+			uint8 payload[8]{};
+			if (!readExact(payload, sizeof(payload)))
+				break;
+			uint64 credential = 0;
+			for (int i = 0; i < 8; ++i)
+				credential |= (static_cast<uint64>(payload[i]) << (i * 8));
+			uint64 token = 0;
+			const bool ok = CemuPadBridge::GetInstance().Authenticate(credential, token);
+			uint8 response[9];
+			response[0] = ok ? 0x00 : 0x01;
+			for (int i = 0; i < 8; ++i)
+				response[1 + i] = static_cast<uint8>((token >> (i * 8)) & 0xFF);
+			if (send(s, reinterpret_cast<const char*>(response), sizeof(response), 0) != sizeof(response))
+				break;
+			if (ok)
+			{
+				cemuLog_log(LogType::Force, "VideoStreamServer: Client authenticated");
+				SetClientAuthorized(clientSocket, true);
+			}
+			else
+			{
+				cemuLog_log(LogType::Force, "VideoStreamServer: Client auth failed, disconnecting");
+				break;
+			}
 		}
 		else if (opcode == OPCODE_TRANSPORT_UDP || opcode == OPCODE_TRANSPORT_TCP)
 		{

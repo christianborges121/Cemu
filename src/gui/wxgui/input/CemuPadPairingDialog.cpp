@@ -8,7 +8,7 @@
 
 CemuPadPairingDialog::CemuPadPairingDialog(wxWindow* parent)
 	: wxDialog(parent, wxID_ANY, "Pair CemuPad Android GamePad",
-		wxDefaultPosition, wxSize(480, 320),
+		wxDefaultPosition, wxSize(1360, 880),
 		wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
 {
 	InitUI();
@@ -34,13 +34,18 @@ void CemuPadPairingDialog::InitUI()
 	rootSizer->Add(headerText, 0, wxALL, 10);
 
 	m_deviceList = new wxListView(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
-	m_deviceList->AppendColumn("Device Name", wxLIST_FORMAT_LEFT, 200);
-	m_deviceList->AppendColumn("IP Address", wxLIST_FORMAT_LEFT, 130);
-	m_deviceList->AppendColumn("Status", wxLIST_FORMAT_LEFT, 100);
+	m_deviceList->AppendColumn("Device Name", wxLIST_FORMAT_LEFT, 520);
+	m_deviceList->AppendColumn("IP Address", wxLIST_FORMAT_LEFT, 340);
+	m_deviceList->AppendColumn("Status", wxLIST_FORMAT_LEFT, 300);
 	rootSizer->Add(m_deviceList, 1, wxEXPAND | wxLEFT | wxRIGHT, 10);
 
 	m_statusText = new wxStaticText(this, wxID_ANY, "Scanning for CemuPad devices on UDP 26763...");
 	rootSizer->Add(m_statusText, 0, wxALL, 10);
+
+	// NOTE (2026-09-13): session PIN UI disabled per user decision — the
+	// pairing flow stays open-session. Bridge PIN API + server auth remain
+	// compiled (open sessions auto-approve); restore a checkbox calling
+	// CemuPadBridge::SetRequirePin()/GetCurrentPin() to re-enable.
 
 	auto* btnSizer = new wxBoxSizer(wxHORIZONTAL);
 	m_rescanButton = new wxButton(this, wxID_ANY, "Rescan");
@@ -78,6 +83,10 @@ void CemuPadPairingDialog::OnRescanClicked(wxCommandEvent&)
 void CemuPadPairingDialog::OnTimer(wxTimerEvent&)
 {
 	RefreshDeviceList();
+	// Re-probe while open: phones stop broadcasting once video streams, so a
+	// one-shot probe would let entries expire (30s) and strand the dialog.
+	if (++m_pollTicks % 5 == 0)
+		DiscoveryServer::GetInstance().BroadcastProbe();
 }
 
 void CemuPadPairingDialog::RefreshDeviceList()

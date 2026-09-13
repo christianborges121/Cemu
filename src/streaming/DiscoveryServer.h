@@ -48,7 +48,8 @@ public:
 	// Send a "CEMU_DISCOVER" probe to 255.255.255.255:<port>.
 	void BroadcastProbe();
 
-	// Snapshot of currently visible devices (entries older than 10s are pruned).
+	// Snapshot of currently visible devices (entries older than 30s are pruned;
+	// the pairing dialog re-probes every 5s so live phones stay listed).
 	std::vector<DiscoveredDevice> GetDiscoveredDevices();
 	void SetDeviceDiscoveredCallback(std::function<void(const DiscoveredDevice&)> callback);
 

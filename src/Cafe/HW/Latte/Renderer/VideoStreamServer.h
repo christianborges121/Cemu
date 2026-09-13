@@ -42,6 +42,8 @@ public:
 	static constexpr uint8 OPCODE_MIC_BLOW = 0x13;
 	static constexpr uint8 OPCODE_SET_BITRATE = 0x14;    // uint32 bitrate_bps (little-endian)
 	static constexpr uint8 OPCODE_SET_RESOLUTION = 0x15; // uint16 width + uint16 height (little-endian)
+	static constexpr uint8 OPCODE_AUTH_REQUEST = 0x30;   // uint64 credential LE (PIN or session token)
+	static constexpr uint8 OPCODE_AUTH_RESPONSE = 0x31;  // 1 status byte + uint64 LE token (server -> phone, unframed)
 
 	// Ports
 	static constexpr uint16 AUDIO_PORT = 26762;
@@ -63,6 +65,7 @@ private:
 	void ServerThreadFunc();
 	void ClientRxThreadFunc(uintptr_t clientSocket);
 	void MicRxThreadFunc();
+	void SetClientAuthorized(uintptr_t clientSocket, bool authorized);
 	void PruneFinishedRxThreads();
 	void SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe);
 
@@ -71,6 +74,7 @@ private:
 		uintptr_t socket;
 		sockaddr_in addr; // peer address for UDP video target
 		bool useUdp{ false };
+		bool authorized{ true }; // false until AUTH passes when PIN is required
 	};
 
 	std::atomic<bool> m_isRunning{ false };
