@@ -404,6 +404,49 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 		VariantClear(&var);
 	}
 
+	// ---- DRAIN-BEFORE-INPUT: pull any pending encoded frame before pushing new input ----
+	// This prevents MF_E_NOTACCEPTING entirely (the MFT's input buffer is always free)
+	// and eliminates the old drain path that silently discarded encoded frames.
+	{
+		MFT_OUTPUT_DATA_BUFFER preDrainBuf{};
+		DWORD preDrainStatus = 0;
+		IMFMediaBuffer* pPreBuf = nullptr;
+		MFCreateMemoryBuffer(m_outBufferSize, &pPreBuf);
+		IMFSample* pPreSample = nullptr;
+		MFCreateSample(&pPreSample);
+		pPreSample->AddBuffer(pPreBuf);
+		preDrainBuf.pSample = pPreSample;
+		preDrainBuf.dwStreamID = m_outStreamId;
+		HRESULT preDrainHr = m_pTransform->ProcessOutput(0, 1, &preDrainBuf, &preDrainStatus);
+		if (SUCCEEDED(preDrainHr) && preDrainBuf.pSample)
+		{
+			// A previous frame was sitting in the MFT output. Extract and emit it
+			// so we don't silently discard encoded data (the old drain bug).
+			UINT32 preClean = 0;
+			preDrainBuf.pSample->GetUINT32(MFSampleExtension_CleanPoint, &preClean);
+			IMFMediaBuffer* pPreMedia = nullptr;
+			preDrainBuf.pSample->ConvertToContiguousBuffer(&pPreMedia);
+			if (pPreMedia)
+			{
+				BYTE* pPreBytes = nullptr;
+				DWORD preLen = 0;
+				pPreMedia->Lock(&pPreBytes, nullptr, &preLen);
+				if (pPreBytes && preLen > 0)
+				{
+					outH264.assign(pPreBytes, pPreBytes + preLen);
+					m_lastFrameWasKeyframe = (preClean != 0);
+					if (m_lastFrameWasKeyframe)
+						m_forceKeyframeNext = false;
+				}
+				pPreMedia->Unlock();
+				pPreMedia->Release();
+			}
+		}
+		if (preDrainBuf.pEvents) preDrainBuf.pEvents->Release();
+		pPreBuf->Release();
+		pPreSample->Release();
+	}
+
 	// Create input Media Sample
 	IMFMediaBuffer* pInputBuffer = nullptr;
 	DWORD bufSize = static_cast<DWORD>(m_nv12Buffer.size());
@@ -426,26 +469,6 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	}
 
 	HRESULT hr = m_pTransform->ProcessInput(m_inStreamId, pInputSample, 0);
-	if (hr == MF_E_NOTACCEPTING)
-	{
-		// Drain output buffer to free up MFT pipeline
-		MFT_OUTPUT_DATA_BUFFER drainBuffer{};
-		DWORD drainStatus = 0;
-		IMFMediaBuffer* pDrainBuf = nullptr;
-		MFCreateMemoryBuffer(m_outBufferSize, &pDrainBuf);
-		IMFSample* pDrainSample = nullptr;
-		MFCreateSample(&pDrainSample);
-		pDrainSample->AddBuffer(pDrainBuf);
-		drainBuffer.pSample = pDrainSample;
-		drainBuffer.dwStreamID = m_outStreamId;
-		m_pTransform->ProcessOutput(0, 1, &drainBuffer, &drainStatus);
-		if (drainBuffer.pEvents) drainBuffer.pEvents->Release();
-		pDrainBuf->Release();
-		pDrainSample->Release();
-
-		// Retry ProcessInput
-		hr = m_pTransform->ProcessInput(m_inStreamId, pInputSample, 0);
-	}
 
 	pInputBuffer->Release();
 	pInputSample->Release();
@@ -455,10 +478,10 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 		static uint32 s_inputFailCount = 0;
 		if (++s_inputFailCount % 60 == 0)
 			cemuLog_log(LogType::Force, "VideoEncoder: ProcessInput failed (hr=0x{:08X}, count={})", (uint32)hr, s_inputFailCount);
-		return false;
+		return !outH264.empty(); // may still have the pre-drained frame
 	}
 
-	// Drain output
+	// Drain output — the frame we just pushed (or the one before it, pipelined)
 	MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
 	DWORD status = 0;
 
@@ -472,12 +495,6 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 	outputDataBuffer.dwStreamID = m_outStreamId;
 
 	hr = m_pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-	if (FAILED(hr) && hr != MF_E_TRANSFORM_NEED_MORE_INPUT)
-	{
-		static uint32 s_outFailCount = 0;
-		if (++s_outFailCount % 60 == 0)
-			cemuLog_log(LogType::Force, "VideoEncoder: ProcessOutput failed (hr=0x{:08X}, count={})", (uint32)hr, s_outFailCount);
-	}
 	if (SUCCEEDED(hr) && outputDataBuffer.pSample)
 	{
 		UINT32 isCleanPoint = 0;
@@ -494,11 +511,15 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 			{
 				outH264.assign(pBytes, pBytes + curLen);
 
-				// Inspect H.264 Annex B stream for SPS (7) or IDR slice (5) to accurately identify keyframes
+				// Determine keyframe status: trust MFSampleExtension_CleanPoint first.
+				// Only scan NAL headers when we specifically requested a keyframe
+				// (to confirm it was actually produced), and limit to the first 128
+				// bytes where SPS/PPS/IDR NAL start codes always appear.
 				bool hasIdr = (isCleanPoint != 0);
-				if (!hasIdr)
+				if (!hasIdr && shouldForceKeyframe)
 				{
-					for (size_t i = 0; i + 4 < curLen; ++i)
+					const size_t scanLimit = std::min((size_t)curLen, (size_t)128);
+					for (size_t i = 0; i + 4 < scanLimit; ++i)
 					{
 						if (pBytes[i] == 0 && pBytes[i + 1] == 0)
 						{
@@ -508,7 +529,7 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 							else if (pBytes[i + 2] == 0 && pBytes[i + 3] == 1)
 								offset = i + 4;
 
-							if (offset != 0 && offset < curLen)
+							if (offset != 0 && offset < scanLimit)
 							{
 								uint8 nalType = pBytes[offset] & 0x1F;
 								if (nalType == 5 || nalType == 7)
