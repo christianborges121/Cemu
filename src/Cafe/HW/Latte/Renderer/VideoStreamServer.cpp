@@ -7,9 +7,40 @@
 
 #if defined(_WIN32)
 #pragma comment(lib, "ws2_32.lib")
-#else
-#include <sys/ioctl.h>
 #endif
+
+namespace
+{
+#if defined(MSG_NOSIGNAL)
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
+inline void SetSocketNonBlocking(SOCKET s)
+{
+#if defined(_WIN32)
+	u_long nonBlocking = 1;
+	ioctlsocket(s, FIONBIO, &nonBlocking);
+#else
+	int flags = fcntl(s, F_GETFL, 0);
+	fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+inline void SetSocketRecvTimeout(SOCKET s, int timeoutMs)
+{
+#if defined(_WIN32)
+	DWORD timeout = static_cast<DWORD>(timeoutMs);
+	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+	struct timeval timeout{};
+	timeout.tv_sec = timeoutMs / 1000;
+	timeout.tv_usec = (timeoutMs % 1000) * 1000;
+	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#endif
+}
+}
 
 VideoStreamServer& VideoStreamServer::GetInstance()
 {
@@ -51,15 +82,8 @@ bool VideoStreamServer::Start(uint16 port)
 		// Non-blocking: a full kernel buffer must drop (and count) instead
 		// of stalling the encode worker shared with TCP clients.
 		int sndBuf = 1024 * 1024;
-#if defined(_WIN32)
-		u_long nonBlocking = 1;
-		ioctlsocket(m_udpSock, FIONBIO, &nonBlocking);
-		setsockopt(m_udpSock, SOL_SOCKET, SO_SNDBUF, (const char*)&sndBuf, sizeof(sndBuf));
-#else
-		int nonBlocking = 1;
-		ioctl(m_udpSock, FIONBIO, &nonBlocking);
-		setsockopt(m_udpSock, SOL_SOCKET, SO_SNDBUF, &sndBuf, sizeof(sndBuf));
-#endif
+		SetSocketNonBlocking(m_udpSock);
+		setsockopt(m_udpSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sndBuf), sizeof(sndBuf));
 		cemuLog_log(LogType::Force, "VideoStreamServer: UDP video ready on port {}", port);
 	}
 
@@ -82,22 +106,14 @@ void VideoStreamServer::Stop()
 		std::lock_guard<std::mutex> lock(m_clientsMutex);
 		for (auto& client : m_clients)
 		{
-#if defined(_WIN32)
-			closesocket((SOCKET)client.socket);
-#else
-			close((int)client.socket);
-#endif
+			CloseSocket(static_cast<SOCKET>(client.socket));
 		}
 		m_clients.clear();
 	}
 
 	if (m_udpSock != INVALID_SOCKET)
 	{
-#if defined(_WIN32)
-		closesocket(m_udpSock);
-#else
-		close(m_udpSock);
-#endif
+		CloseSocket(m_udpSock);
 		m_udpSock = INVALID_SOCKET;
 	}
 
@@ -107,12 +123,6 @@ void VideoStreamServer::Stop()
 	if (m_micThread.joinable())
 		m_micThread.join();
 
-	for (auto& t : m_rxThreads)
-	{
-		if (t.joinable())
-			t.join();
-	}
-	m_rxThreads.clear();
 	cemuLog_log(LogType::Force, "VideoStreamServer: Stopped");
 }
 
@@ -171,7 +181,7 @@ void VideoStreamServer::SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, 
 		uint8 datagram[UDP_HEADER_SIZE + UDP_MAX_PAYLOAD];
 		memcpy(datagram, header, UDP_HEADER_SIZE);
 		memcpy(datagram + UDP_HEADER_SIZE, data + offset, chunk);
-		int sent = sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + chunk), 0, (sockaddr*)&dest, sizeof(dest));
+		int sent = sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + chunk), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
 		if (sent <= 0)
 			m_udpSendErrors.fetch_add(1);
 	}
@@ -235,7 +245,7 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 
 		while (remaining > 0)
 		{
-			int sent = send((SOCKET)s, buf, remaining, 0);
+			int sent = send(static_cast<SOCKET>(s), buf, remaining, kSendFlags);
 			if (sent <= 0)
 			{
 				sendFailed = true;
@@ -248,11 +258,7 @@ void VideoStreamServer::BroadcastFrame(uint8 packetType, uint64 ptsUs, const uin
 		if (sendFailed)
 		{
 			cemuLog_log(LogType::Force, "VideoStreamServer: Client disconnected on send error");
-#if defined(_WIN32)
-			closesocket((SOCKET)s);
-#else
-			close((int)s);
-#endif
+			CloseSocket(static_cast<SOCKET>(s));
 			failedSockets.push_back(s);
 		}
 	}
@@ -308,7 +314,7 @@ void VideoStreamServer::BroadcastRumble(bool active, uint8 intensity, uint16 dur
 	{
 		if (!client.authorized)
 			continue;
-		send((SOCKET)client.socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0);
+		send(static_cast<SOCKET>(client.socket), reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), kSendFlags);
 	}
 
 	cemuLog_log(LogType::Force, "VideoStreamServer: BroadcastRumble active={} intensity={} durationMs={} sent to {} clients",
@@ -375,28 +381,8 @@ void VideoStreamServer::BroadcastAudio(const void* data, size_t size)
 
 		for (const auto& target : targets)
 		{
-			sendto(m_udpSock, reinterpret_cast<const char*>(packet), static_cast<int>(16 + curChunk), 0, (sockaddr*)&target, sizeof(target));
+			sendto(m_udpSock, reinterpret_cast<const char*>(packet), static_cast<int>(16 + curChunk), 0, reinterpret_cast<const sockaddr*>(&target), sizeof(target));
 		}
-	}
-}
-
-void VideoStreamServer::PruneFinishedRxThreads()
-{
-	for (auto it = m_rxThreads.begin(); it != m_rxThreads.end();)
-	{
-		if (it->joinable())
-		{
-#if defined(_WIN32)
-			DWORD result = WaitForSingleObject(it->native_handle(), 0);
-			if (result == WAIT_OBJECT_0)
-			{
-				it->join();
-				it = m_rxThreads.erase(it);
-				continue;
-			}
-#endif
-		}
-		++it;
 	}
 }
 
@@ -410,59 +396,53 @@ void VideoStreamServer::ServerThreadFunc()
 	}
 
 	int opt = 1;
-	setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+	setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
 
 	sockaddr_in serverAddr{};
 	serverAddr.sin_family = AF_INET;
 	serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	serverAddr.sin_port = htons(m_port);
 
-	if (bind(listenSock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
+	if (bind(listenSock, reinterpret_cast<const sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR)
 	{
 		cemuLog_log(LogType::Force, "VideoStreamServer: Bind failed on port {}", m_port);
-		closesocket(listenSock);
+		CloseSocket(listenSock);
 		return;
 	}
 
 	if (listen(listenSock, 4) == SOCKET_ERROR)
 	{
 		cemuLog_log(LogType::Force, "VideoStreamServer: Listen failed");
-		closesocket(listenSock);
+		CloseSocket(listenSock);
 		return;
 	}
 
 	// Set 500ms accept timeout so we can exit cleanly
-	DWORD timeout = 500;
-	setsockopt(listenSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+	SetSocketRecvTimeout(listenSock, 500);
 
 	while (m_isRunning)
 	{
-		PruneFinishedRxThreads();
-
 		sockaddr_in clientAddr{};
+#if defined(_WIN32)
 		int addrLen = sizeof(clientAddr);
-		SOCKET clientSock = accept(listenSock, (sockaddr*)&clientAddr, &addrLen);
+#else
+		socklen_t addrLen = sizeof(clientAddr);
+#endif
+		SOCKET clientSock = accept(listenSock, reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
 
 		if (clientSock == INVALID_SOCKET)
 			continue;
 
 		// Set TCP_NODELAY for immediate packet dispatch (disable Nagle's algorithm)
 		int noDelay = 1;
-		setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, (const char*)&noDelay, sizeof(noDelay));
+		setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
 
 		// Set large send buffer for smooth 60fps streaming
 		int sndBuf = 1024 * 512;
-		setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, (const char*)&sndBuf, sizeof(sndBuf));
+		setsockopt(clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sndBuf), sizeof(sndBuf));
 
-		// Accepted sockets inherit SO_RCVTIMEO from listenSock on Windows.
-		// Reset receive timeout to 0 (infinite) so reverse control packets are not timed out.
-#if defined(_WIN32)
-		DWORD zeroTimeout = 0;
-		setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zeroTimeout, sizeof(zeroTimeout));
-#else
-		struct timeval zeroTimeout{};
-		setsockopt(clientSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&zeroTimeout, sizeof(zeroTimeout));
-#endif
+		// Reset receive timeout to 0 (infinite)
+		SetSocketRecvTimeout(clientSock, 0);
 
 		cemuLog_log(LogType::Force, "VideoStreamServer: Android client connected to video stream!");
 
@@ -481,12 +461,11 @@ void VideoStreamServer::ServerThreadFunc()
 		// Request an immediate keyframe so the client can begin decoding right away
 		StreamingCapture::GetInstance().RequestKeyframe();
 
-		// Spawn thread to listen for reverse control packets
-		// (IDR_REQUEST = 0x10, TRANSPORT_UDP = 0x11, TRANSPORT_TCP = 0x12)
-		m_rxThreads.emplace_back(&VideoStreamServer::ClientRxThreadFunc, this, (uintptr_t)clientSock);
+		// Spawn detached thread to listen for reverse control packets
+		std::thread(&VideoStreamServer::ClientRxThreadFunc, this, (uintptr_t)clientSock).detach();
 	}
 
-	closesocket(listenSock);
+	CloseSocket(listenSock);
 }
 
 void VideoStreamServer::SetClientAuthorized(uintptr_t clientSocket, bool authorized)
@@ -586,7 +565,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 			response[0] = ok ? 0x00 : 0x01;
 			for (int i = 0; i < 8; ++i)
 				response[1 + i] = static_cast<uint8>((token >> (i * 8)) & 0xFF);
-			if (send(s, reinterpret_cast<const char*>(response), sizeof(response), 0) != sizeof(response))
+			if (send(s, reinterpret_cast<const char*>(response), sizeof(response), kSendFlags) != sizeof(response))
 				break;
 			if (ok)
 			{
@@ -669,11 +648,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 			}
 		}
 	}
-#if defined(_WIN32)
-	closesocket(s);
-#else
-	close((int)s);
-#endif
+	CloseSocket(s);
 }
 
 // Note: UDP discovery now lives in streaming/DiscoveryServer (Phase 4.0).
@@ -696,26 +671,14 @@ void VideoStreamServer::MicRxThreadFunc()
 	bindAddr.sin_family = AF_INET;
 	bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 	bindAddr.sin_port = htons(MIC_PORT);
-	if (bind(sock, (sockaddr*)&bindAddr, sizeof(bindAddr)) != 0)
+	if (bind(sock, reinterpret_cast<const sockaddr*>(&bindAddr), sizeof(bindAddr)) != 0)
 	{
 		cemuLog_log(LogType::Force, "VideoStreamServer: Mic bind failed on UDP port {}", MIC_PORT);
-#if defined(_WIN32)
-		closesocket(sock);
-#else
-		close((int)sock);
-#endif
+		CloseSocket(sock);
 		return;
 	}
 
-#if defined(_WIN32)
-	DWORD timeoutMs = 500;
-	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
-#else
-	timeval timeout{};
-	timeout.tv_sec = 0;
-	timeout.tv_usec = 500 * 1000;
-	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-#endif
+	SetSocketRecvTimeout(sock, 500);
 
 	cemuLog_log(LogType::Force, "VideoStreamServer: Voice mic listening on UDP port {}", MIC_PORT);
 
@@ -725,10 +688,10 @@ void VideoStreamServer::MicRxThreadFunc()
 		sockaddr_in sender{};
 #if defined(_WIN32)
 		int senderLen = sizeof(sender);
-		const int bytes = recvfrom(sock, buffer, sizeof(buffer), 0, (sockaddr*)&sender, &senderLen);
+		const int bytes = recvfrom(sock, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&sender), &senderLen);
 #else
 		socklen_t senderLen = sizeof(sender);
-		const ssize_t received = recvfrom(sock, buffer, sizeof(buffer), 0, (sockaddr*)&sender, &senderLen);
+		const ssize_t received = recvfrom(sock, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&sender), &senderLen);
 		const int bytes = static_cast<int>(received);
 #endif
 		if (bytes <= 8)
@@ -746,9 +709,5 @@ void VideoStreamServer::MicRxThreadFunc()
 			reinterpret_cast<const int16_t*>(buffer + 8), static_cast<size_t>(sampleCount));
 	}
 
-#if defined(_WIN32)
-	closesocket(sock);
-#else
-	close((int)sock);
-#endif
+	CloseSocket(sock);
 }

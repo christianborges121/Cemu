@@ -11,9 +11,31 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+
 using SOCKET = int;
 constexpr int INVALID_SOCKET = -1;
+constexpr int SOCKET_ERROR = -1;
 #endif
+
+inline void CloseSocket(SOCKET s)
+{
+	if (s != INVALID_SOCKET)
+	{
+#if defined(_WIN32)
+		closesocket(s);
+#else
+		::close(s);
+#endif
+	}
+}
 
 class VideoStreamServer
 {
@@ -66,7 +88,6 @@ private:
 	void ClientRxThreadFunc(uintptr_t clientSocket);
 	void MicRxThreadFunc();
 	void SetClientAuthorized(uintptr_t clientSocket, bool authorized);
-	void PruneFinishedRxThreads();
 	void SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe);
 
 	struct ClientInfo
@@ -82,7 +103,6 @@ private:
 	uint16 m_port{ 26761 };
 
 	std::thread m_serverThread;
-	std::vector<std::thread> m_rxThreads;
 	std::thread m_micThread;
 
 	SOCKET m_udpSock{ INVALID_SOCKET };
