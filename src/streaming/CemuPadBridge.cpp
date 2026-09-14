@@ -357,3 +357,93 @@ bool CemuPadBridge::Authenticate(uint64_t credential, uint64_t& outToken)
 	}
 	return false;
 }
+
+bool CemuPadBridge::ApplyPushedMappings(const std::vector<std::pair<uint64, uint64>>& entries, bool clearExisting)
+{
+	if (entries.empty() || entries.size() > kMaxPushedMappings)
+	{
+		cemuLog_log(LogType::Force, "CemuPadBridge: ApplyPushedMappings rejected: entry count {}", entries.size());
+		return false;
+	}
+	auto& inputMgr = InputManager::instance();
+	auto vpad = inputMgr.get_vpad_controller(0);
+	if (!vpad)
+	{
+		cemuLog_log(LogType::Force, "CemuPadBridge: No VPAD on slot 0, creating emulated Wii U GamePad for pushed mappings");
+		auto created = inputMgr.set_controller(0, EmulatedController::Type::VPAD);
+		vpad = std::dynamic_pointer_cast<VPADController>(created);
+		if (!vpad)
+		{
+			cemuLog_log(LogType::Force, "CemuPadBridge: Failed to create VPAD for pushed mappings");
+			return false;
+		}
+	}
+	std::string ip = GetStreamingTarget();
+	if (ip.empty()) ip = "127.0.0.1";
+
+	// Look for existing DSUController on this slot
+	std::shared_ptr<ControllerBase> targetController;
+	for (const auto& ctrl : vpad->get_controllers())
+	{
+		if (ctrl && ctrl->api() == InputAPI::DSUClient)
+		{
+			targetController = ctrl;
+			break;
+		}
+	}
+
+	if (!targetController)
+	{
+		try
+		{
+			DSUProviderSettings settings(ip, 26760);
+			targetController = std::make_shared<DSUController>(0, settings);
+		}
+		catch (const std::exception& e)
+		{
+			cemuLog_log(LogType::Force, "CemuPadBridge: Failed to create DSU controller for pushed mappings: {}", e.what());
+			return false;
+		}
+	}
+
+	if (clearExisting)
+	{
+		// Force overwrite: drop stale controllers and isolate the DSU controller
+		vpad->clear_controllers();
+		vpad->add_controller(targetController);
+		vpad->clear_mappings();
+	}
+	else
+	{
+		// Ensure target controller is attached
+		auto controllers = vpad->get_controllers();
+		if (std::find(controllers.begin(), controllers.end(), targetController) == controllers.end())
+		{
+			vpad->add_controller(targetController);
+		}
+	}
+
+	uint64 maxMapping = vpad->get_highest_mapping_id();
+	for (auto& [mappingId, buttonId] : entries)
+	{
+		if (mappingId > maxMapping)
+		{
+			cemuLog_log(LogType::Force, "CemuPadBridge: Mapping id {} out of range (max {})", mappingId, maxMapping);
+			return false;
+		}
+		if (buttonId >= kButtonMAX)
+		{
+			cemuLog_log(LogType::Force, "CemuPadBridge: Button id {} out of range (max {})", buttonId, kButtonMAX);
+			return false;
+		}
+		vpad->set_mapping(mappingId, targetController, buttonId);
+		cemuLog_log(LogType::Force, "CemuPadBridge: Mapped {} -> {}", mappingId, buttonId);
+	}
+	if (!inputMgr.save(0))
+	{
+		cemuLog_log(LogType::Force, "CemuPadBridge: Failed to save controller0.xml after pushed mappings");
+		return false;
+	}
+	cemuLog_log(LogType::Force, "CemuPadBridge: Applied {} pushed mappings to controller0", entries.size());
+	return true;
+}

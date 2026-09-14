@@ -3,6 +3,7 @@
 #include "Cafe/HW/Latte/Renderer/StreamingCapture.h"
 #include "Cafe/HW/Latte/Renderer/VideoEncoder.h"
 #include "streaming/CemuPadBridge.h"
+#include "streaming/ReedSolomon.h"
 #include "Cemu/Logging/CemuLogging.h"
 
 #if defined(_WIN32)
@@ -134,58 +135,165 @@ bool VideoStreamServer::HasActiveClient() const
 
 void VideoStreamServer::SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe)
 {
-	if (m_udpSock == INVALID_SOCKET)
+	if (m_udpSock == INVALID_SOCKET || !data || size == 0)
 		return;
 
 	const uint64 frameCount = m_udpFrames.fetch_add(1) + 1;
 	const uint32 frameId = m_frameId.fetch_add(1);
-	const uint32 packetCount = static_cast<uint32>((size + UDP_MAX_PAYLOAD - 1) / UDP_MAX_PAYLOAD);
+	const uint32 dataCount = static_cast<uint32>((size + UDP_RAW_CHUNK - 1) / UDP_RAW_CHUNK);
+	if (dataCount == 0 || dataCount > CemuPad::ReedSolomon::MAX_DATA_SHARDS)
+		return;
+
+	// Calculate parity shards: ~20% of data shards for loss recovery
+	uint32 parityCount = 0;
+	if (dataCount > 1)
+	{
+		parityCount = std::min<uint32>(16, std::max<uint32>(1, (dataCount * 20 + 99) / 100));
+	}
+
+	sockaddr_in dest = destAddr;
+	dest.sin_port = htons(m_port);
+
 	uint8 header[UDP_HEADER_SIZE];
 	header[0] = static_cast<uint8>(UDP_MAGIC & 0xFF);
 	header[1] = static_cast<uint8>((UDP_MAGIC >> 8) & 0xFF);
 	header[2] = UDP_VERSION;
 
-	sockaddr_in dest = destAddr;
-	dest.sin_port = htons(m_port);
-
-	for (uint32 i = 0; i < packetCount; ++i)
+	if (parityCount > 0)
 	{
-		const size_t offset = static_cast<size_t>(i) * UDP_MAX_PAYLOAD;
-		const size_t chunk = std::min(UDP_MAX_PAYLOAD, size - offset);
-		uint8 flags = 0;
-		if (i == 0)
-			flags |= UDP_FLAG_START;
-		if (i + 1 == packetCount)
-			flags |= UDP_FLAG_END;
-		if (isKeyframe)
-			flags |= UDP_FLAG_IDR;
-		header[3] = flags;
+		// Shard buffers: each has 2-byte chunkLen prefix + data padded to UDP_BLOCK_SIZE
+		std::vector<std::vector<uint8_t>> dataShards(dataCount, std::vector<uint8_t>(UDP_BLOCK_SIZE, 0));
+		std::vector<const uint8_t*> dataPtrs(dataCount);
+		for (uint32 i = 0; i < dataCount; ++i)
+		{
+			const size_t offset = static_cast<size_t>(i) * UDP_RAW_CHUNK;
+			const size_t chunk = std::min(UDP_RAW_CHUNK, size - offset);
+			dataShards[i][0] = static_cast<uint8_t>(chunk & 0xFF);
+			dataShards[i][1] = static_cast<uint8_t>((chunk >> 8) & 0xFF);
+			std::memcpy(dataShards[i].data() + 2, data + offset, chunk);
+			dataPtrs[i] = dataShards[i].data();
+		}
 
-		const uint32 seq = m_seq.fetch_add(1);
-		header[4] = static_cast<uint8>(frameId & 0xFF);
-		header[5] = static_cast<uint8>((frameId >> 8) & 0xFF);
-		header[6] = static_cast<uint8>((frameId >> 16) & 0xFF);
-		header[7] = static_cast<uint8>((frameId >> 24) & 0xFF);
-		header[8] = static_cast<uint8>(seq & 0xFF);
-		header[9] = static_cast<uint8>((seq >> 8) & 0xFF);
-		header[10] = static_cast<uint8>((seq >> 16) & 0xFF);
-		header[11] = static_cast<uint8>((seq >> 24) & 0xFF);
-		header[12] = static_cast<uint8>(i & 0xFF);
-		header[13] = static_cast<uint8>((i >> 8) & 0xFF);
-		header[14] = static_cast<uint8>(packetCount & 0xFF);
-		header[15] = static_cast<uint8>((packetCount >> 8) & 0xFF);
-		for (int b = 0; b < 8; ++b)
-			header[16 + b] = static_cast<uint8>((ptsUs >> (b * 8)) & 0xFF);
+		std::vector<std::vector<uint8_t>> parityShards(parityCount, std::vector<uint8_t>(UDP_BLOCK_SIZE, 0));
+		std::vector<uint8_t*> parityPtrs(parityCount);
+		for (uint32 j = 0; j < parityCount; ++j)
+			parityPtrs[j] = parityShards[j].data();
 
-		// Single stack buffer per datagram: portable and heap-free.
-		uint8 datagram[UDP_HEADER_SIZE + UDP_MAX_PAYLOAD];
-		memcpy(datagram, header, UDP_HEADER_SIZE);
-		memcpy(datagram + UDP_HEADER_SIZE, data + offset, chunk);
-		int sent = sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + chunk), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-		if (sent <= 0)
-			m_udpSendErrors.fetch_add(1);
+		CemuPad::ReedSolomon::Encode(dataPtrs.data(), dataCount, parityPtrs.data(), parityCount, static_cast<int>(UDP_BLOCK_SIZE));
+
+		// 1. Send all data shards
+		for (uint32 i = 0; i < dataCount; ++i)
+		{
+			uint8 flags = 0;
+			if (i == 0)
+				flags |= UDP_FLAG_START;
+			if (i + 1 == dataCount)
+				flags |= UDP_FLAG_END;
+			if (isKeyframe)
+				flags |= UDP_FLAG_IDR;
+			header[3] = flags;
+
+			const uint32 seq = m_seq.fetch_add(1);
+			header[4] = static_cast<uint8>(frameId & 0xFF);
+			header[5] = static_cast<uint8>((frameId >> 8) & 0xFF);
+			header[6] = static_cast<uint8>((frameId >> 16) & 0xFF);
+			header[7] = static_cast<uint8>((frameId >> 24) & 0xFF);
+			header[8] = static_cast<uint8>(seq & 0xFF);
+			header[9] = static_cast<uint8>((seq >> 8) & 0xFF);
+			header[10] = static_cast<uint8>((seq >> 16) & 0xFF);
+			header[11] = static_cast<uint8>((seq >> 24) & 0xFF);
+			header[12] = static_cast<uint8>(i & 0xFF);
+			header[13] = static_cast<uint8>((i >> 8) & 0xFF);
+			header[14] = static_cast<uint8>(dataCount & 0xFF);
+			header[15] = static_cast<uint8>(parityCount & 0xFF);
+			for (int b = 0; b < 8; ++b)
+				header[16 + b] = static_cast<uint8>((ptsUs >> (b * 8)) & 0xFF);
+
+			uint8 datagram[UDP_HEADER_SIZE + UDP_BLOCK_SIZE];
+			std::memcpy(datagram, header, UDP_HEADER_SIZE);
+			std::memcpy(datagram + UDP_HEADER_SIZE, dataShards[i].data(), UDP_BLOCK_SIZE);
+			int sent = sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + UDP_BLOCK_SIZE), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+			if (sent <= 0)
+				m_udpSendErrors.fetch_add(1);
+		}
+
+		// 2. Send all parity shards
+		for (uint32 j = 0; j < parityCount; ++j)
+		{
+			uint8 flags = UDP_FLAG_FEC;
+			if (isKeyframe)
+				flags |= UDP_FLAG_IDR;
+			header[3] = flags;
+
+			const uint32 seq = m_seq.fetch_add(1);
+			header[4] = static_cast<uint8>(frameId & 0xFF);
+			header[5] = static_cast<uint8>((frameId >> 8) & 0xFF);
+			header[6] = static_cast<uint8>((frameId >> 16) & 0xFF);
+			header[7] = static_cast<uint8>((frameId >> 24) & 0xFF);
+			header[8] = static_cast<uint8>(seq & 0xFF);
+			header[9] = static_cast<uint8>((seq >> 8) & 0xFF);
+			header[10] = static_cast<uint8>((seq >> 16) & 0xFF);
+			header[11] = static_cast<uint8>((seq >> 24) & 0xFF);
+			const uint32 packetIndex = dataCount + j;
+			header[12] = static_cast<uint8>(packetIndex & 0xFF);
+			header[13] = static_cast<uint8>((packetIndex >> 8) & 0xFF);
+			header[14] = static_cast<uint8>(dataCount & 0xFF);
+			header[15] = static_cast<uint8>(parityCount & 0xFF);
+			for (int b = 0; b < 8; ++b)
+				header[16 + b] = static_cast<uint8>((ptsUs >> (b * 8)) & 0xFF);
+
+			uint8 datagram[UDP_HEADER_SIZE + UDP_BLOCK_SIZE];
+			std::memcpy(datagram, header, UDP_HEADER_SIZE);
+			std::memcpy(datagram + UDP_HEADER_SIZE, parityShards[j].data(), UDP_BLOCK_SIZE);
+			int sent = sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + UDP_BLOCK_SIZE), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+			if (sent <= 0)
+				m_udpSendErrors.fetch_add(1);
+		}
+
+		m_udpPackets.fetch_add(dataCount + parityCount);
 	}
-	m_udpPackets.fetch_add(packetCount);
+	else
+	{
+		// Legacy / single packet fallback
+		for (uint32 i = 0; i < dataCount; ++i)
+		{
+			const size_t offset = static_cast<size_t>(i) * UDP_RAW_CHUNK;
+			const size_t chunk = std::min(UDP_RAW_CHUNK, size - offset);
+			uint8 flags = 0;
+			if (i == 0)
+				flags |= UDP_FLAG_START;
+			if (i + 1 == dataCount)
+				flags |= UDP_FLAG_END;
+			if (isKeyframe)
+				flags |= UDP_FLAG_IDR;
+			header[3] = flags;
+
+			const uint32 seq = m_seq.fetch_add(1);
+			header[4] = static_cast<uint8>(frameId & 0xFF);
+			header[5] = static_cast<uint8>((frameId >> 8) & 0xFF);
+			header[6] = static_cast<uint8>((frameId >> 16) & 0xFF);
+			header[7] = static_cast<uint8>((frameId >> 24) & 0xFF);
+			header[8] = static_cast<uint8>(seq & 0xFF);
+			header[9] = static_cast<uint8>((seq >> 8) & 0xFF);
+			header[10] = static_cast<uint8>((seq >> 16) & 0xFF);
+			header[11] = static_cast<uint8>((seq >> 24) & 0xFF);
+			header[12] = static_cast<uint8>(i & 0xFF);
+			header[13] = static_cast<uint8>((i >> 8) & 0xFF);
+			header[14] = static_cast<uint8>(dataCount & 0xFF);
+			header[15] = 0;
+			for (int b = 0; b < 8; ++b)
+				header[16 + b] = static_cast<uint8>((ptsUs >> (b * 8)) & 0xFF);
+
+			uint8 datagram[UDP_HEADER_SIZE + UDP_BLOCK_SIZE];
+			std::memcpy(datagram, header, UDP_HEADER_SIZE);
+			std::memcpy(datagram + UDP_HEADER_SIZE, data + offset, chunk);
+			int sent = sendto(m_udpSock, reinterpret_cast<const char*>(datagram), static_cast<int>(UDP_HEADER_SIZE + chunk), 0, reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+			if (sent <= 0)
+				m_udpSendErrors.fetch_add(1);
+		}
+		m_udpPackets.fetch_add(dataCount);
+	}
+
 	if ((frameCount % 600) == 0)
 	{
 		cemuLog_log(LogType::Force, "VideoStreamServer: UDP video {} frames, {} packets, {} send errors",
@@ -542,6 +650,33 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 				if (!readExact(ignored, sizeof(ignored)))
 					break;
 			}
+			else if (opcode == OPCODE_CODEC_SELECT)
+			{
+				uint8 ignored = 0;
+				if (!readExact(&ignored, 1))
+					break;
+			}
+			else if (opcode == OPCODE_STATS_REPORT)
+			{
+				uint8 ignored[8]{};
+				if (!readExact(ignored, sizeof(ignored)))
+					break;
+			}
+			else if (opcode == OPCODE_PUSH_MAPPINGS)
+			{
+				uint8 count = 0;
+				if (!readExact(&count, 1)) break;
+				if (count == 0 || count > 32) { continue; }
+				uint8 buf[32 * 8];
+				if (!readExact(buf, count * 8)) break;
+				// still auth-gated: drop without consuming further state
+			}
+			else if (opcode == OPCODE_SET_MAPPING)
+			{
+				uint8 ignored[9]{};
+				if (!readExact(ignored, sizeof(ignored)))
+					break;
+			}
 			continue;
 		}
 
@@ -631,6 +766,99 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 					VideoEncoder::GetInstance().RequestKeyframe();
 				}
 			}
+		}
+		else if (opcode == OPCODE_CODEC_SELECT)
+		{
+			uint8 codecId = 0;
+			if (readExact(&codecId, 1))
+			{
+				cemuLog_log(LogType::Force, "VideoStreamServer: Received CODEC_SELECT = {}", (codecId == 1) ? "HEVC" : "H.264");
+				const VideoCodec selectedCodec = (codecId == 1) ? VideoCodec::HEVC : VideoCodec::H264;
+				if (VideoEncoder::GetInstance().SetCodec(selectedCodec))
+				{
+					m_adaptiveBitrate.store(VideoEncoder::GetInstance().GetCodec() == VideoCodec::HEVC ? 8000000 : 6000000);
+					// New VPS/SPS/PPS: force a keyframe so the phone re-syncs immediately.
+					VideoEncoder::GetInstance().RequestKeyframe();
+				}
+			}
+		}
+		else if (opcode == OPCODE_STATS_REPORT)
+		{
+			uint8 payload[8]{};
+			if (readExact(payload, sizeof(payload)))
+			{
+				uint16 lossHundredths = static_cast<uint16>(payload[0] | (payload[1] << 8));
+				uint16 dropHundredths = static_cast<uint16>(payload[2] | (payload[3] << 8));
+				uint16 rttMs = static_cast<uint16>(payload[4] | (payload[5] << 8));
+				// flags in payload[6..7] reserved
+				auto now = std::chrono::steady_clock::now();
+				if (now - m_lastBitrateAdapt < std::chrono::milliseconds(1000))
+				{
+					// Rate-limit adaptation to 1 Hz to avoid oscillation
+				}
+				else
+				{
+					m_lastBitrateAdapt = now;
+					uint32 curBitrate = m_adaptiveBitrate.load();
+					if (curBitrate == 0) curBitrate = 6000000;
+					uint32 newBitrate = curBitrate;
+					// Thresholds: packet loss is primary congestion signal; frame drop alone
+					// (often reassembler expiry) should not collapse bitrate. Require >5% packet loss to reduce.
+					if (lossHundredths > 500)
+					{
+						newBitrate = static_cast<uint32>(curBitrate * 0.85);
+						newBitrate = std::max<uint32>(newBitrate, 1000000);
+						cemuLog_log(LogType::Force, "VideoStreamServer: Adaptive bitrate DOWN {} -> {} (loss={} drop={} rtt={}ms)", curBitrate, newBitrate, lossHundredths, dropHundredths, rttMs);
+					}
+					else if (lossHundredths < 100 && dropHundredths < 200)
+					{
+						newBitrate = static_cast<uint32>(curBitrate * 1.10);
+						newBitrate = std::min<uint32>(newBitrate, 12000000);
+						if (newBitrate != curBitrate)
+							cemuLog_log(LogType::Force, "VideoStreamServer: Adaptive bitrate UP {} -> {} (loss={} drop={})", curBitrate, newBitrate, lossHundredths, dropHundredths);
+					}
+					if (newBitrate != curBitrate)
+					{
+						m_adaptiveBitrate.store(newBitrate);
+						VideoEncoder::GetInstance().SetBitrate(newBitrate);
+					}
+				}
+			}
+		}
+		else if (opcode == OPCODE_PUSH_MAPPINGS)
+		{
+			uint8 count = 0;
+			if (!readExact(&count, 1)) break;
+			if (count == 0 || count > 32)
+			{
+				uint8 status = 0x01;
+				send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
+				continue;
+			}
+			uint8 buf[32 * 8];
+			if (!readExact(buf, count * 8)) break;
+			std::vector<std::pair<uint64, uint64>> entries;
+			entries.reserve(count);
+			for (uint8 i = 0; i < count; ++i)
+			{
+				uint32 mapping = static_cast<uint32>(buf[i * 8 + 0]) | (static_cast<uint32>(buf[i * 8 + 1]) << 8) | (static_cast<uint32>(buf[i * 8 + 2]) << 16) | (static_cast<uint32>(buf[i * 8 + 3]) << 24);
+				uint32 button = static_cast<uint32>(buf[i * 8 + 4]) | (static_cast<uint32>(buf[i * 8 + 5]) << 8) | (static_cast<uint32>(buf[i * 8 + 6]) << 16) | (static_cast<uint32>(buf[i * 8 + 7]) << 24);
+				entries.emplace_back(mapping, button);
+			}
+			bool ok = CemuPadBridge::GetInstance().ApplyPushedMappings(entries, true);
+			uint8 status = ok ? 0x00 : 0x01;
+			send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
+			cemuLog_log(LogType::Force, "VideoStreamServer: PUSH_MAPPINGS {} entries -> {}", count, ok ? "OK" : "FAIL");
+		}
+		else if (opcode == OPCODE_SET_MAPPING)
+		{
+			uint8 payload[9]{};
+			if (!readExact(payload, sizeof(payload))) break;
+			uint32 mapping = static_cast<uint32>(payload[0]) | (static_cast<uint32>(payload[1]) << 8) | (static_cast<uint32>(payload[2]) << 16) | (static_cast<uint32>(payload[3]) << 24);
+			uint32 button = static_cast<uint32>(payload[4]) | (static_cast<uint32>(payload[5]) << 8) | (static_cast<uint32>(payload[6]) << 16) | (static_cast<uint32>(payload[7]) << 24);
+			bool ok = CemuPadBridge::GetInstance().ApplyPushedMappings({{mapping, button}}, false);
+			uint8 status = ok ? 0x00 : 0x01;
+			send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
 		}
 	}
 

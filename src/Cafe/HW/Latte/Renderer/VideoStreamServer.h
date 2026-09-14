@@ -64,6 +64,10 @@ public:
 	static constexpr uint8 OPCODE_MIC_BLOW = 0x13;
 	static constexpr uint8 OPCODE_SET_BITRATE = 0x14;    // uint32 bitrate_bps (little-endian)
 	static constexpr uint8 OPCODE_SET_RESOLUTION = 0x15; // uint16 width + uint16 height (little-endian)
+	static constexpr uint8 OPCODE_CODEC_SELECT = 0x16;   // uint8 codec (0 = H.264, 1 = HEVC)
+	static constexpr uint8 OPCODE_STATS_REPORT = 0x17;   // 8 bytes: uint16 loss LE, uint16 drop LE, uint16 rtt LE, uint16 flags LE
+	static constexpr uint8 OPCODE_PUSH_MAPPINGS = 0x18;  // bulk: [count:1][count*(uint32 mapping LE, uint32 button LE)]
+	static constexpr uint8 OPCODE_SET_MAPPING = 0x19;    // single: [mapping:4][button:4][applyNow:1]
 	static constexpr uint8 OPCODE_AUTH_REQUEST = 0x30;   // uint64 credential LE (PIN or session token)
 	static constexpr uint8 OPCODE_AUTH_RESPONSE = 0x31;  // 1 status byte + uint64 LE token (server -> phone, unframed)
 
@@ -77,7 +81,10 @@ public:
 	static constexpr uint8 UDP_FLAG_START = 0x01;
 	static constexpr uint8 UDP_FLAG_END = 0x02;
 	static constexpr uint8 UDP_FLAG_IDR = 0x04;
+	static constexpr uint8 UDP_FLAG_FEC = 0x08;
 	static constexpr size_t UDP_HEADER_SIZE = 24;
+	static constexpr size_t UDP_RAW_CHUNK = 1360;
+	static constexpr size_t UDP_BLOCK_SIZE = UDP_RAW_CHUNK + 2; // 1362 bytes (2-byte chunkLen prefix + data)
 	static constexpr size_t UDP_MAX_PAYLOAD = 1400;
 
 private:
@@ -112,6 +119,8 @@ private:
 	std::atomic<uint64> m_udpFrames{ 0 };
 	std::atomic<uint64> m_udpPackets{ 0 };
 	std::atomic<uint64> m_udpSendErrors{ 0 };
+	std::chrono::steady_clock::time_point m_lastBitrateAdapt{ std::chrono::steady_clock::now() };
+	std::atomic<uint32> m_adaptiveBitrate{ 6000000 };
 
 	mutable std::mutex m_clientsMutex;
 	std::vector<ClientInfo> m_clients;

@@ -82,6 +82,10 @@ public:
 	// fresh session token to outToken (cache it client-side for reconnects).
 	bool Authenticate(uint64_t credential, uint64_t& outToken);
 
+	// Phase 8: Bulk push of Android wizard mappings into Cemu's controller0.xml.
+	static constexpr size_t kMaxPushedMappings = 32;
+	bool ApplyPushedMappings(const std::vector<std::pair<uint64, uint64>>& entries, bool clearExisting = true);
+
 private:
 	CemuPadBridge() = default;
 	~CemuPadBridge() = default;
