@@ -656,6 +656,12 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 				if (!readExact(&ignored, 1))
 					break;
 			}
+			else if (opcode == OPCODE_STATS_REPORT)
+			{
+				uint8 ignored[8]{};
+				if (!readExact(ignored, sizeof(ignored)))
+					break;
+			}
 			continue;
 		}
 
@@ -755,8 +761,51 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 				const VideoCodec selectedCodec = (codecId == 1) ? VideoCodec::HEVC : VideoCodec::H264;
 				if (VideoEncoder::GetInstance().SetCodec(selectedCodec))
 				{
+					m_adaptiveBitrate.store(VideoEncoder::GetInstance().GetCodec() == VideoCodec::HEVC ? 8000000 : 6000000);
 					// New VPS/SPS/PPS: force a keyframe so the phone re-syncs immediately.
 					VideoEncoder::GetInstance().RequestKeyframe();
+				}
+			}
+		}
+		else if (opcode == OPCODE_STATS_REPORT)
+		{
+			uint8 payload[8]{};
+			if (readExact(payload, sizeof(payload)))
+			{
+				uint16 lossHundredths = static_cast<uint16>(payload[0] | (payload[1] << 8));
+				uint16 dropHundredths = static_cast<uint16>(payload[2] | (payload[3] << 8));
+				uint16 rttMs = static_cast<uint16>(payload[4] | (payload[5] << 8));
+				// flags in payload[6..7] reserved
+				auto now = std::chrono::steady_clock::now();
+				if (now - m_lastBitrateAdapt < std::chrono::milliseconds(1000))
+				{
+					// Rate-limit adaptation to 1 Hz to avoid oscillation
+				}
+				else
+				{
+					m_lastBitrateAdapt = now;
+					uint32 curBitrate = m_adaptiveBitrate.load();
+					if (curBitrate == 0) curBitrate = 6000000;
+					uint32 newBitrate = curBitrate;
+					// Thresholds: >5% loss/drop -> reduce, <1% -> increase
+					if (lossHundredths > 500 || dropHundredths > 500)
+					{
+						newBitrate = static_cast<uint32>(curBitrate * 0.85);
+						newBitrate = std::max<uint32>(newBitrate, 1000000);
+						cemuLog_log(LogType::Force, "VideoStreamServer: Adaptive bitrate DOWN {} -> {} (loss={} drop={} rtt={}ms)", curBitrate, newBitrate, lossHundredths, dropHundredths, rttMs);
+					}
+					else if (lossHundredths < 100 && dropHundredths < 100)
+					{
+						newBitrate = static_cast<uint32>(curBitrate * 1.10);
+						newBitrate = std::min<uint32>(newBitrate, 12000000);
+						if (newBitrate != curBitrate)
+							cemuLog_log(LogType::Force, "VideoStreamServer: Adaptive bitrate UP {} -> {} (loss={} drop={})", curBitrate, newBitrate, lossHundredths, dropHundredths);
+					}
+					if (newBitrate != curBitrate)
+					{
+						m_adaptiveBitrate.store(newBitrate);
+						VideoEncoder::GetInstance().SetBitrate(newBitrate);
+					}
 				}
 			}
 		}
