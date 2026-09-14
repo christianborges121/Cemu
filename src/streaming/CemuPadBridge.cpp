@@ -378,20 +378,26 @@ bool CemuPadBridge::ApplyPushedMappings(const std::vector<std::pair<uint64, uint
 			return false;
 		}
 	}
-	auto controllers = vpad->get_controllers();
+	std::string ip = GetStreamingTarget();
+	if (ip.empty()) ip = "127.0.0.1";
+
+	// Look for existing DSUController on this slot
 	std::shared_ptr<ControllerBase> targetController;
-	if (!controllers.empty())
-		targetController = controllers[0];
+	for (const auto& ctrl : vpad->get_controllers())
+	{
+		if (ctrl && ctrl->api() == InputAPI::DSUClient)
+		{
+			targetController = ctrl;
+			break;
+		}
+	}
+
 	if (!targetController)
 	{
-		std::string ip = GetStreamingTarget();
-		if (ip.empty()) ip = "127.0.0.1";
 		try
 		{
 			DSUProviderSettings settings(ip, 26760);
 			targetController = std::make_shared<DSUController>(0, settings);
-			vpad->clear_controllers();
-			vpad->add_controller(targetController);
 		}
 		catch (const std::exception& e)
 		{
@@ -399,14 +405,35 @@ bool CemuPadBridge::ApplyPushedMappings(const std::vector<std::pair<uint64, uint
 			return false;
 		}
 	}
+
 	if (clearExisting)
+	{
+		// Force overwrite: drop stale controllers and isolate the DSU controller
+		vpad->clear_controllers();
+		vpad->add_controller(targetController);
 		vpad->clear_mappings();
+	}
+	else
+	{
+		// Ensure target controller is attached
+		auto controllers = vpad->get_controllers();
+		if (std::find(controllers.begin(), controllers.end(), targetController) == controllers.end())
+		{
+			vpad->add_controller(targetController);
+		}
+	}
+
 	uint64 maxMapping = vpad->get_highest_mapping_id();
 	for (auto& [mappingId, buttonId] : entries)
 	{
 		if (mappingId > maxMapping)
 		{
 			cemuLog_log(LogType::Force, "CemuPadBridge: Mapping id {} out of range (max {})", mappingId, maxMapping);
+			return false;
+		}
+		if (buttonId >= kButtonMAX)
+		{
+			cemuLog_log(LogType::Force, "CemuPadBridge: Button id {} out of range (max {})", buttonId, kButtonMAX);
 			return false;
 		}
 		vpad->set_mapping(mappingId, targetController, buttonId);
