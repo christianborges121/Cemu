@@ -787,14 +787,15 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 					uint32 curBitrate = m_adaptiveBitrate.load();
 					if (curBitrate == 0) curBitrate = 6000000;
 					uint32 newBitrate = curBitrate;
-					// Thresholds: >5% loss/drop -> reduce, <1% -> increase
-					if (lossHundredths > 500 || dropHundredths > 500)
+					// Thresholds: packet loss is primary congestion signal; frame drop alone
+					// (often reassembler expiry) should not collapse bitrate. Require >5% packet loss to reduce.
+					if (lossHundredths > 500)
 					{
 						newBitrate = static_cast<uint32>(curBitrate * 0.85);
 						newBitrate = std::max<uint32>(newBitrate, 1000000);
 						cemuLog_log(LogType::Force, "VideoStreamServer: Adaptive bitrate DOWN {} -> {} (loss={} drop={} rtt={}ms)", curBitrate, newBitrate, lossHundredths, dropHundredths, rttMs);
 					}
-					else if (lossHundredths < 100 && dropHundredths < 100)
+					else if (lossHundredths < 100 && dropHundredths < 200)
 					{
 						newBitrate = static_cast<uint32>(curBitrate * 1.10);
 						newBitrate = std::min<uint32>(newBitrate, 12000000);
