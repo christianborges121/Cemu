@@ -1011,7 +1011,6 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 
 	if ((renderTarget & RENDER_TARGET_DRC) && (g_renderer->IsPadWindowActive() || StreamingCapture::GetInstance().IsStreamingActive()))
 		LatteRenderTarget_copyToBackbuffer(texView, true);
-
 	if (((renderTarget & RENDER_TARGET_TV) && !showDRC) || ((renderTarget & RENDER_TARGET_DRC) && showDRC))
 		LatteRenderTarget_copyToBackbuffer(texView, false);
 }

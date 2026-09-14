@@ -1,4 +1,5 @@
 #include "input/emulated/EmulatedController.h"
+
 #include "input/api/Controller.h"
 #include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 

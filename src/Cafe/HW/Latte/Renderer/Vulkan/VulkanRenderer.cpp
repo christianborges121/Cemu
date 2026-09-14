@@ -1004,7 +1004,7 @@ void VulkanRenderer::StopUsingPadAndWait()
 
 bool VulkanRenderer::IsPadWindowActive()
 {
-	return IsSwapchainInfoValid(false) || StreamingCapture::GetInstance().IsStreamingActive();
+	return IsSwapchainInfoValid(false);
 }
 
 void VulkanRenderer::HandleStreamingCapture(LatteTextureView* texView)

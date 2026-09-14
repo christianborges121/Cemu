@@ -400,7 +400,7 @@ void VPADController::clear_rumble()
 	m_parser = 0;
 
 	VideoStreamServer::GetInstance().BroadcastRumble(false, 0, 0);
-	cemuLog_log(LogType::Force, "VPADController::clear_rumble: cleared GamePad rumble");
+	cemuLog_log(LogType::InputAPI, "VPADController::clear_rumble: cleared GamePad rumble");
 }
 
 bool VPADController::push_rumble(uint8* pattern, uint8 length)
@@ -459,7 +459,7 @@ bool VPADController::push_rumble(uint8* pattern, uint8 length)
 	if (activeCount > 0)
 	{
 		VideoStreamServer::GetInstance().BroadcastRumble(true, intensity, durationMs);
-		cemuLog_log(LogType::Force, "VPADController::push_rumble: length={}, activeBits={}/{}, intensity={}, durationMs={}",
+		cemuLog_log(LogType::InputAPI, "VPADController::push_rumble: length={}, activeBits={}/{}, intensity={}, durationMs={}",
 			length, activeCount, bitset.size(), intensity, durationMs);
 	}
 	else

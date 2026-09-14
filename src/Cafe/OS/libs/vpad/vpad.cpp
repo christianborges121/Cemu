@@ -858,11 +858,11 @@ void vpadExport_VPADControlMotor(PPCInterpreter_t* hCPU)
 	ppcDefineParamU32(channel, 0);
 	ppcDefineParamUStr(pattern, 1);
 	ppcDefineParamU8(length, 2);
-	cemuLog_log(LogType::Force, "VPADControlMotor({}, _, {})", channel, length);
+	cemuLog_log(LogType::InputAPI, "VPADControlMotor({}, _, {})", channel, length);
 
 	if (length > 120)
 	{
-		cemuLog_log(LogType::Force, "VPADControlMotor() - length too high with {} of 120", length);
+		cemuLog_log(LogType::InputAPI, "VPADControlMotor() - length too high with {} of 120", length);
 		length = 120;
 	}
 
@@ -892,7 +892,7 @@ void vpadExport_VPADControlMotor(PPCInterpreter_t* hCPU)
 void vpadExport_VPADStopMotor(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamU32(channel, 0);
-	cemuLog_log(LogType::Force, "VPADStopMotor({})", channel);
+	cemuLog_log(LogType::InputAPI, "VPADStopMotor({})", channel);
 
 	if (const auto controller = InputManager::instance().get_vpad_controller(channel))
 	{
