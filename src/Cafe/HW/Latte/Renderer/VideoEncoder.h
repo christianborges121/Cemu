@@ -17,12 +17,18 @@
 #include <codecapi.h>
 #endif
 
+enum class VideoCodec
+{
+	H264 = 0,
+	HEVC = 1,
+};
+
 class VideoEncoder
 {
 public:
 	static VideoEncoder& GetInstance();
 
-	bool Initialize(uint32 width = 854, uint32 height = 480, uint32 fps = 60, uint32 bitrate = 6000000);
+	bool Initialize(uint32 width = 854, uint32 height = 480, uint32 fps = 60, uint32 bitrate = 6000000, VideoCodec codec = VideoCodec::H264);
 	void Shutdown();
 
 	using FrameOutputCallback = std::function<void(const uint8* data, size_t size, uint64 ptsUs, bool isKeyframe)>;
@@ -34,13 +40,16 @@ public:
 	bool IsInitialized() const { return m_isInitialized; }
 	bool WasLastFrameKeyframe() const { return m_lastFrameWasKeyframe; }
 
-	// Runtime reconfiguration (Phase 4.2). Safe to call from any thread.
+	// Runtime reconfiguration (Phase 4.2 & 7.3). Safe to call from any thread.
 	// SetBitrate updates the live MFT target when streaming; the value is
 	// always stored so a later Initialize() picks it up.
 	bool SetBitrate(uint32 bitrateBps);
 	// SetResolution reinitializes the encoder for an allowlisted target
 	// (854x480, 1280x720, 1920x1080). Returns false for unsupported sizes.
 	bool SetResolution(uint16 width, uint16 height);
+	// SetCodec dynamically switches between H.264 and HEVC.
+	bool SetCodec(VideoCodec codec);
+	VideoCodec GetCodec() const { return m_codec; }
 
 private:
 	VideoEncoder();
@@ -54,7 +63,7 @@ private:
 		std::string name;
 		bool isHardware{ false };
 	};
-	std::vector<MFTCandidate> CreateEncoderCandidates();
+	std::vector<MFTCandidate> CreateEncoderCandidates(VideoCodec codec);
 #endif
 
 	bool m_isInitialized{ false };
@@ -62,6 +71,7 @@ private:
 	uint32 m_height{ 480 };
 	uint32 m_fps{ 60 };
 	uint32 m_bitrate{ 6000000 };
+	VideoCodec m_codec{ VideoCodec::H264 };
 
 	std::mutex m_encoderMutex;
 	bool m_forceKeyframeNext{ false };

@@ -8,6 +8,8 @@ add_library(CemuStreaming STATIC
   CemuPadBridge.h
   DiscoveryServer.cpp
   DiscoveryServer.h
+  ReedSolomon.cpp
+  ReedSolomon.h
 )
 
 # PUBLIC "../" so consumers can include "streaming/CemuPadBridge.h"

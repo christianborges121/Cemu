@@ -34,10 +34,11 @@ VideoEncoder::~VideoEncoder()
 }
 
 #if defined(_WIN32)
-std::vector<VideoEncoder::MFTCandidate> VideoEncoder::CreateEncoderCandidates()
+std::vector<VideoEncoder::MFTCandidate> VideoEncoder::CreateEncoderCandidates(VideoCodec codec)
 {
 	std::vector<MFTCandidate> candidates;
-	MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Video, MFVideoFormat_H264 };
+	const GUID formatGuid = (codec == VideoCodec::HEVC) ? MFVideoFormat_HEVC : MFVideoFormat_H264;
+	MFT_REGISTER_TYPE_INFO outputType = { MFMediaType_Video, formatGuid };
 
 	// Step 1: Discover hardware MFTs (NVENC, AMF, QuickSync)
 	IMFActivate** ppActivate = nullptr;
@@ -46,7 +47,7 @@ std::vector<VideoEncoder::MFTCandidate> VideoEncoder::CreateEncoderCandidates()
 		MFT_CATEGORY_VIDEO_ENCODER,
 		MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
 		nullptr,        // input type: any
-		&outputType,    // output type: H.264
+		&outputType,    // output type: H.264 or HEVC
 		&ppActivate,
 		&count
 	);
@@ -59,7 +60,7 @@ std::vector<VideoEncoder::MFTCandidate> VideoEncoder::CreateEncoderCandidates()
 			hr = ppActivate[i]->ActivateObject(IID_PPV_ARGS(&pTransform));
 			if (SUCCEEDED(hr) && pTransform)
 			{
-				std::string name = "Hardware H.264 Encoder";
+				std::string name = (codec == VideoCodec::HEVC) ? "Hardware HEVC Encoder" : "Hardware H.264 Encoder";
 				LPWSTR friendlyName = nullptr;
 				UINT32 nameLen = 0;
 				ppActivate[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendlyName, &nameLen);
@@ -97,7 +98,7 @@ std::vector<VideoEncoder::MFTCandidate> VideoEncoder::CreateEncoderCandidates()
 			hr = ppActivate[i]->ActivateObject(IID_PPV_ARGS(&pTransform));
 			if (SUCCEEDED(hr) && pTransform)
 			{
-				std::string name = "Software H.264 Encoder MFT";
+				std::string name = (codec == VideoCodec::HEVC) ? "Software HEVC Encoder MFT" : "Software H.264 Encoder MFT";
 				LPWSTR friendlyName = nullptr;
 				UINT32 nameLen = 0;
 				ppActivate[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendlyName, &nameLen);
@@ -115,20 +116,23 @@ std::vector<VideoEncoder::MFTCandidate> VideoEncoder::CreateEncoderCandidates()
 		CoTaskMemFree(ppActivate);
 	}
 
-	// Step 3: Direct CLSID software instantiation fallback
-	IMFTransform* pTransform = nullptr;
-	hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
-		IID_IMFTransform, (void**)&pTransform);
-	if (SUCCEEDED(hr) && pTransform)
+	// Step 3: Direct CLSID software instantiation fallback (H.264 only)
+	if (codec == VideoCodec::H264)
 	{
-		candidates.push_back({ pTransform, "CLSID_CMSH264EncoderMFT", false });
+		IMFTransform* pTransform = nullptr;
+		hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
+			IID_IMFTransform, (void**)&pTransform);
+		if (SUCCEEDED(hr) && pTransform)
+		{
+			candidates.push_back({ pTransform, "CLSID_CMSH264EncoderMFT", false });
+		}
 	}
 
 	return candidates;
 }
 #endif
 
-bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bitrate)
+bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bitrate, VideoCodec codec)
 {
 	std::lock_guard<std::mutex> lock(m_encoderMutex);
 
@@ -140,14 +144,21 @@ bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bi
 	m_height = height & ~1;
 	m_fps = fps;
 	m_bitrate = bitrate;
+	m_codec = codec;
 
 	m_nv12Buffer.resize((m_width * m_height * 3) / 2);
 
 #if defined(_WIN32)
-	auto candidates = CreateEncoderCandidates();
+	auto candidates = CreateEncoderCandidates(m_codec);
+	if (candidates.empty() && m_codec == VideoCodec::HEVC)
+	{
+		cemuLog_log(LogType::Force, "VideoEncoder: No hardware HEVC encoder found, falling back to H.264");
+		m_codec = VideoCodec::H264;
+		candidates = CreateEncoderCandidates(m_codec);
+	}
 	if (candidates.empty())
 	{
-		cemuLog_log(LogType::Force, "VideoEncoder: No H.264 encoder MFT candidates found on system");
+		cemuLog_log(LogType::Force, "VideoEncoder: No video encoder MFT candidates found on system");
 		return false;
 	}
 
@@ -177,17 +188,21 @@ bool VideoEncoder::Initialize(uint32 width, uint32 height, uint32 fps, uint32 bi
 			if (trialW == 0)
 				break;
 
-			// 1. Configure Output Media Type (H.264)
+			// 1. Configure Output Media Type (H.264 / HEVC)
 			IMFMediaType* pOutputType = nullptr;
 			MFCreateMediaType(&pOutputType);
 			pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-			pOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+			const GUID targetFormat = (m_codec == VideoCodec::HEVC) ? MFVideoFormat_HEVC : MFVideoFormat_H264;
+			pOutputType->SetGUID(MF_MT_SUBTYPE, targetFormat);
 			pOutputType->SetUINT32(MF_MT_AVG_BITRATE, m_bitrate);
 			MFSetAttributeSize(pOutputType, MF_MT_FRAME_SIZE, trialW, m_height);
 			MFSetAttributeRatio(pOutputType, MF_MT_FRAME_RATE, m_fps, 1);
 			MFSetAttributeRatio(pOutputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 			pOutputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-			pOutputType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+			if (m_codec == VideoCodec::H264)
+			{
+				pOutputType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+			}
 
 			HRESULT hr = pTransform->SetOutputType(m_outStreamId, pOutputType, 0);
 			pOutputType->Release();
@@ -404,7 +419,29 @@ bool VideoEncoder::SetResolution(uint16 width, uint16 height)
 	cemuLog_log(LogType::Force, "VideoEncoder: Reconfiguring resolution to {}x{}", targetW, targetH);
 	// Note: Initialize() takes m_encoderMutex internally, so it must be
 	// called without holding the lock here (non-recursive mutex).
-	return Initialize(targetW, targetH, fps, bitrate);
+	return Initialize(targetW, targetH, fps, bitrate, m_codec);
+}
+
+bool VideoEncoder::SetCodec(VideoCodec codec)
+{
+	uint32 w;
+	uint32 h;
+	uint32 fps;
+	uint32 bitrate;
+	{
+		std::lock_guard<std::mutex> lock(m_encoderMutex);
+		if (m_codec == codec && m_isInitialized)
+			return true;
+		cemuLog_log(LogType::Force, "VideoEncoder: Switching codec to {}", (codec == VideoCodec::HEVC) ? "HEVC" : "H.264");
+		m_codec = codec;
+		if (!m_isInitialized)
+			return true;
+		w = m_width;
+		h = m_height;
+		fps = m_fps;
+		bitrate = m_bitrate;
+	}
+	return Initialize(w, h, fps, bitrate, codec);
 }
 
 void VideoEncoder::ConvertRGBAToNV12(const uint8* pixels, uint32 srcWidth, uint32 srcHeight, uint32 pitch, StreamingPixelFormat pixelFormat, uint8* nv12Y, uint8* nv12UV)
