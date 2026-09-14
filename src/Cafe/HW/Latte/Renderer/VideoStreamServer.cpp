@@ -662,6 +662,21 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 				if (!readExact(ignored, sizeof(ignored)))
 					break;
 			}
+			else if (opcode == OPCODE_PUSH_MAPPINGS)
+			{
+				uint8 count = 0;
+				if (!readExact(&count, 1)) break;
+				if (count == 0 || count > 32) { continue; }
+				uint8 buf[32 * 8];
+				if (!readExact(buf, count * 8)) break;
+				// still auth-gated: drop without consuming further state
+			}
+			else if (opcode == OPCODE_SET_MAPPING)
+			{
+				uint8 ignored[9]{};
+				if (!readExact(ignored, sizeof(ignored)))
+					break;
+			}
 			continue;
 		}
 
@@ -809,6 +824,41 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 					}
 				}
 			}
+		}
+		else if (opcode == OPCODE_PUSH_MAPPINGS)
+		{
+			uint8 count = 0;
+			if (!readExact(&count, 1)) break;
+			if (count == 0 || count > 32)
+			{
+				uint8 status = 0x01;
+				send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
+				continue;
+			}
+			uint8 buf[32 * 8];
+			if (!readExact(buf, count * 8)) break;
+			std::vector<std::pair<uint64, uint64>> entries;
+			entries.reserve(count);
+			for (uint8 i = 0; i < count; ++i)
+			{
+				uint32 mapping = static_cast<uint32>(buf[i * 8 + 0]) | (static_cast<uint32>(buf[i * 8 + 1]) << 8) | (static_cast<uint32>(buf[i * 8 + 2]) << 16) | (static_cast<uint32>(buf[i * 8 + 3]) << 24);
+				uint32 button = static_cast<uint32>(buf[i * 8 + 4]) | (static_cast<uint32>(buf[i * 8 + 5]) << 8) | (static_cast<uint32>(buf[i * 8 + 6]) << 16) | (static_cast<uint32>(buf[i * 8 + 7]) << 24);
+				entries.emplace_back(mapping, button);
+			}
+			bool ok = CemuPadBridge::GetInstance().ApplyPushedMappings(entries, true);
+			uint8 status = ok ? 0x00 : 0x01;
+			send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
+			cemuLog_log(LogType::Force, "VideoStreamServer: PUSH_MAPPINGS {} entries -> {}", count, ok ? "OK" : "FAIL");
+		}
+		else if (opcode == OPCODE_SET_MAPPING)
+		{
+			uint8 payload[9]{};
+			if (!readExact(payload, sizeof(payload))) break;
+			uint32 mapping = static_cast<uint32>(payload[0]) | (static_cast<uint32>(payload[1]) << 8) | (static_cast<uint32>(payload[2]) << 16) | (static_cast<uint32>(payload[3]) << 24);
+			uint32 button = static_cast<uint32>(payload[4]) | (static_cast<uint32>(payload[5]) << 8) | (static_cast<uint32>(payload[6]) << 16) | (static_cast<uint32>(payload[7]) << 24);
+			bool ok = CemuPadBridge::GetInstance().ApplyPushedMappings({{mapping, button}}, false);
+			uint8 status = ok ? 0x00 : 0x01;
+			send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
 		}
 	}
 
