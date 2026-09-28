@@ -50,6 +50,9 @@ public:
 	// SetCodec dynamically switches between H.264 and HEVC.
 	bool SetCodec(VideoCodec codec);
 	VideoCodec GetCodec() const { return m_codec; }
+	uint32 GetWidth() const { return m_width; }
+	uint32 GetHeight() const { return m_height; }
+	uint32 GetBitrate() const { return m_bitrate; }
 
 private:
 	VideoEncoder();

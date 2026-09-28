@@ -13,12 +13,14 @@
 //   CemuInput/CemuComponents, while core libs only reference this header and
 //   resolve symbols at the final CemuBin link.
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -80,7 +82,16 @@ public:
 	uint32_t RegeneratePin();
 	// Validates a credential (PIN or remembered token). On success writes a
 	// fresh session token to outToken (cache it client-side for reconnects).
-	bool Authenticate(uint64_t credential, uint64_t& outToken);
+	bool Authenticate(uint64_t credential, uint64_t& outToken, const std::string& clientIp = "");
+	bool IsClientAuthorized(const std::string& ipStr = "") const;
+	bool HasRecentPairingSuccess() const;
+	void ClearPairingSuccess();
+	std::string GetLastPairedIp() const;
+
+	using PairingPromptHandler = std::function<void(const std::string& clientIp, uint32_t pin)>;
+	void SetPairingPromptHandler(PairingPromptHandler handler);
+	void TriggerPairingPrompt(const std::string& clientIp);
+	void AuthorizeClient(const std::string& clientIp);
 
 	// Phase 8: Bulk push of Android wizard mappings into Cemu's controller0.xml.
 	static constexpr size_t kMaxPushedMappings = 32;
@@ -91,6 +102,9 @@ private:
 	~CemuPadBridge() = default;
 	CemuPadBridge(const CemuPadBridge&) = delete;
 	CemuPadBridge& operator=(const CemuPadBridge&) = delete;
+
+	void LoadPersistentTokens();
+	void SavePersistentTokens();
 
 	std::atomic<bool> m_isActive{false};
 
@@ -108,9 +122,21 @@ private:
 	std::deque<int16_t> m_micQueue;
 
 	static constexpr size_t kMaxSessionTokens = 8;
-	std::atomic<bool> m_requirePin{false};
+	std::atomic<bool> m_requirePin{true};
 	std::atomic<uint32_t> m_currentPin{0};
 	mutable std::mutex m_tokenMutex;
 	std::vector<uint64_t> m_sessionTokens;
 	std::mt19937_64 m_tokenRng{std::random_device{}()};
+	std::atomic<uint32_t> m_authFailCount{0};
+	std::chrono::steady_clock::time_point m_lastAuthFail{};
+
+	mutable std::mutex m_authSuccessMutex;
+	std::atomic<bool> m_pairingSuccess{false};
+	std::string m_lastPairedIp;
+	std::set<std::string> m_authorizedIpSet;
+
+	mutable std::mutex m_promptMutex;
+	PairingPromptHandler m_pairingPromptHandler;
+	std::string m_lastPromptIp;
+	std::chrono::steady_clock::time_point m_lastPromptTime{};
 };

@@ -589,6 +589,29 @@ void VideoStreamServer::SetClientAuthorized(uintptr_t clientSocket, bool authori
 	}
 }
 
+void VideoStreamServer::AuthorizeClientIp(const std::string& ipStr)
+{
+	uint32_t ipHost = 0;
+	if (inet_pton(AF_INET, ipStr.c_str(), &ipHost) == 1)
+	{
+		ipHost = ntohl(ipHost);
+		std::scoped_lock lock(m_authorizedIpsMutex);
+		m_authorizedIps.insert(ipHost);
+	}
+}
+
+bool VideoStreamServer::IsClientAuthorized(const std::string& ipStr) const
+{
+	uint32_t ipHost = 0;
+	if (inet_pton(AF_INET, ipStr.c_str(), &ipHost) == 1)
+	{
+		ipHost = ntohl(ipHost);
+		std::scoped_lock lock(m_authorizedIpsMutex);
+		return m_authorizedIps.find(ipHost) != m_authorizedIps.end();
+	}
+	return false;
+}
+
 void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 {
 	SOCKET s = (SOCKET)clientSocket;

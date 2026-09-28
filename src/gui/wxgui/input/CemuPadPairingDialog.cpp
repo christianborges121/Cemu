@@ -2,9 +2,11 @@
 
 #include <wx/sizer.h>
 #include <wx/msgdlg.h>
+#include <wx/checkbox.h>
 
 #include "streaming/CemuPadBridge.h"
 #include "streaming/DiscoveryServer.h"
+#include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 
 CemuPadPairingDialog::CemuPadPairingDialog(wxWindow* parent)
 	: wxDialog(parent, wxID_ANY, "Pair CemuPad Android GamePad",
@@ -14,6 +16,7 @@ CemuPadPairingDialog::CemuPadPairingDialog(wxWindow* parent)
 	InitUI();
 	// Make sure the isolated discovery responder owns UDP 26763, then probe.
 	DiscoveryServer::GetInstance().Start(DiscoveryServer::kDefaultPort);
+	VideoStreamServer::GetInstance().Start(26761);
 	DiscoveryServer::GetInstance().BroadcastProbe();
 	RefreshDeviceList();
 	m_pollTimer.Bind(wxEVT_TIMER, &CemuPadPairingDialog::OnTimer, this);
@@ -42,10 +45,19 @@ void CemuPadPairingDialog::InitUI()
 	m_statusText = new wxStaticText(this, wxID_ANY, "Scanning for CemuPad devices on UDP 26763...");
 	rootSizer->Add(m_statusText, 0, wxALL, 10);
 
-	// NOTE (2026-09-13): session PIN UI disabled per user decision — the
-	// pairing flow stays open-session. Bridge PIN API + server auth remain
-	// compiled (open sessions auto-approve); restore a checkbox calling
-	// CemuPadBridge::SetRequirePin()/GetCurrentPin() to re-enable.
+	// Session PIN security
+	auto& bridge = CemuPadBridge::GetInstance();
+	m_pinCheckbox = new wxCheckBox(this, wxID_ANY, "Require PIN to connect");
+	m_pinCheckbox->SetValue(bridge.IsPinRequired());
+	m_pinCheckbox->Bind(wxEVT_CHECKBOX, &CemuPadPairingDialog::OnPinToggle, this);
+	rootSizer->Add(m_pinCheckbox, 0, wxLEFT | wxRIGHT, 10);
+
+	uint32_t pin = bridge.GetCurrentPin();
+	if (pin == 0) pin = bridge.RegeneratePin();
+	m_pinLabel = new wxStaticText(this, wxID_ANY,
+		wxString::Format("Session PIN: %06u", pin));
+	rootSizer->Add(m_pinLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+	m_pinLabel->Show(bridge.IsPinRequired());
 
 	auto* btnSizer = new wxBoxSizer(wxHORIZONTAL);
 	m_rescanButton = new wxButton(this, wxID_ANY, "Rescan");
@@ -87,6 +99,38 @@ void CemuPadPairingDialog::OnTimer(wxTimerEvent&)
 	// one-shot probe would let entries expire (30s) and strand the dialog.
 	if (++m_pollTicks % 5 == 0)
 		DiscoveryServer::GetInstance().BroadcastProbe();
+
+	auto& bridge = CemuPadBridge::GetInstance();
+	if (bridge.HasRecentPairingSuccess())
+	{
+		bridge.ClearPairingSuccess();
+		std::string pairedIp = bridge.GetLastPairedIp();
+		std::string pairedName = "CemuPad";
+		uint16_t dsuPort = 26760;
+		for (const auto& dev : m_devices)
+		{
+			if (dev.ip == pairedIp || pairedIp.empty())
+			{
+				pairedName = dev.name;
+				pairedIp = dev.ip;
+				dsuPort = dev.dsuPort;
+				break;
+			}
+		}
+
+		bridge.AutoConfigureDSUController(pairedIp, dsuPort);
+		bridge.StartStreaming(pairedIp);
+
+		wxWindow* parent = GetParent();
+		EndModal(wxID_OK);
+
+		wxMessageBox(
+			wxString::Format("CemuPad paired successfully with %s (%s)!\n\nMotion controls and video streaming are now connected.",
+				wxString::FromUTF8(pairedName), wxString::FromUTF8(pairedIp)),
+			"Pairing Successful",
+			wxOK | wxICON_INFORMATION,
+			parent);
+	}
 }
 
 void CemuPadPairingDialog::RefreshDeviceList()
@@ -138,13 +182,157 @@ void CemuPadPairingDialog::OnPairClicked(wxCommandEvent&)
 
 	const DeviceEntry entry = m_devices[static_cast<size_t>(sel)];
 
-	if (!CemuPadBridge::GetInstance().AutoConfigureDSUController(entry.ip, entry.dsuPort))
+	auto& bridge = CemuPadBridge::GetInstance();
+	bridge.ClearPairingSuccess();
+	if (bridge.IsPinRequired() && !bridge.IsClientAuthorized(entry.ip))
+	{
+		uint32_t pin = bridge.GetCurrentPin();
+		if (pin == 0) pin = bridge.RegeneratePin();
+
+		CemuPadPinWaitDialog waitDlg(this, entry.name, entry.ip, pin);
+		if (waitDlg.ShowModal() != wxID_OK)
+		{
+			// User cancelled pairing
+			return;
+		}
+	}
+
+	if (!bridge.AutoConfigureDSUController(entry.ip, entry.dsuPort))
 	{
 		wxMessageBox("Failed to configure DSU controller. Ensure Cemu input settings are not locked.",
 			"Error", wxOK | wxICON_ERROR, this);
 		return;
 	}
 
-	CemuPadBridge::GetInstance().StartStreaming(entry.ip);
+	bridge.StartStreaming(entry.ip);
+
+	wxWindow* parent = GetParent();
+	std::string devName = entry.name;
+	std::string devIp = entry.ip;
 	EndModal(wxID_OK);
+
+	wxMessageBox(
+		wxString::Format("CemuPad paired successfully with %s (%s)!\n\nMotion controls and video streaming are now connected.",
+			wxString::FromUTF8(devName), wxString::FromUTF8(devIp)),
+		"Pairing Successful",
+		wxOK | wxICON_INFORMATION,
+		parent);
+}
+
+CemuPadPinWaitDialog::CemuPadPinWaitDialog(wxWindow* parent, const std::string& deviceName, const std::string& ip, uint32_t pin)
+	: wxDialog(parent, wxID_ANY, wxString::Format("Pairing CemuPad - %s", deviceName),
+		wxDefaultPosition, wxSize(480, 260), wxDEFAULT_DIALOG_STYLE)
+	, m_ip(ip)
+	, m_pin(pin)
+{
+	auto* rootSizer = new wxBoxSizer(wxVERTICAL);
+
+	auto* instrText = new wxStaticText(this, wxID_ANY,
+		"Enter this 6-digit PIN on your Android device to complete pairing:",
+		wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+	rootSizer->Add(instrText, 0, wxALL | wxALIGN_CENTER_HORIZONTAL, 15);
+
+	auto* pinText = new wxStaticText(this, wxID_ANY,
+		wxString::Format("%06u", pin),
+		wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+	wxFont font = pinText->GetFont();
+	font.SetPointSize(28);
+	font.SetWeight(wxFONTWEIGHT_BOLD);
+	pinText->SetFont(font);
+	pinText->SetForegroundColour(wxColour(0, 120, 215));
+	rootSizer->Add(pinText, 0, wxALL | wxALIGN_CENTER_HORIZONTAL, 10);
+
+	m_statusLabel = new wxStaticText(this, wxID_ANY,
+		"Waiting for Android device to enter PIN...",
+		wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+	rootSizer->Add(m_statusLabel, 0, wxALL | wxALIGN_CENTER_HORIZONTAL, 8);
+
+	rootSizer->AddStretchSpacer();
+
+	auto* btnSizer = new wxBoxSizer(wxHORIZONTAL);
+	btnSizer->AddStretchSpacer();
+	auto* allowBtn = new wxButton(this, wxID_OK, "Allow Connection");
+	allowBtn->SetDefault();
+	allowBtn->Bind(wxEVT_BUTTON, &CemuPadPinWaitDialog::OnAllow, this);
+	btnSizer->Add(allowBtn, 0, wxRIGHT, 10);
+	auto* cancelBtn = new wxButton(this, wxID_CANCEL, "Cancel");
+	cancelBtn->Bind(wxEVT_BUTTON, &CemuPadPinWaitDialog::OnCancel, this);
+	btnSizer->Add(cancelBtn, 0, wxRIGHT, 15);
+	rootSizer->Add(btnSizer, 0, wxEXPAND | wxBOTTOM, 15);
+
+	SetSizer(rootSizer);
+	CenterOnParent();
+
+	m_timer.Bind(wxEVT_TIMER, &CemuPadPinWaitDialog::OnTimer, this);
+	m_timer.Start(200);
+}
+
+CemuPadPinWaitDialog::~CemuPadPinWaitDialog()
+{
+	m_timer.Stop();
+}
+
+void CemuPadPinWaitDialog::OnTimer(wxTimerEvent&)
+{
+	m_ticks++;
+	auto& bridge = CemuPadBridge::GetInstance();
+	if (bridge.IsClientAuthorized(m_ip) || bridge.IsClientAuthorized("") || bridge.HasRecentPairingSuccess())
+	{
+		m_timer.Stop();
+		m_statusLabel->SetForegroundColour(wxColour(0, 160, 60));
+		m_statusLabel->SetLabel("PIN verified! Pairing complete.");
+		EndModal(wxID_OK);
+		return;
+	}
+
+	static const char* dots[] = {
+		"Waiting for Android device to enter PIN.",
+		"Waiting for Android device to enter PIN..",
+		"Waiting for Android device to enter PIN..."
+	};
+	m_statusLabel->SetLabel(dots[(m_ticks / 3) % 3]);
+
+	if (m_ticks >= 450)
+	{
+		m_timer.Stop();
+		m_statusLabel->SetForegroundColour(*wxRED);
+		m_statusLabel->SetLabel("Pairing timed out. Please try again.");
+	}
+}
+
+void CemuPadPinWaitDialog::OnAllow(wxCommandEvent&)
+{
+	m_timer.Stop();
+	auto& bridge = CemuPadBridge::GetInstance();
+	bridge.AuthorizeClient(m_ip);
+	m_statusLabel->SetForegroundColour(wxColour(0, 160, 60));
+	m_statusLabel->SetLabel("Connection allowed! Pairing complete.");
+	EndModal(wxID_OK);
+}
+
+void CemuPadPinWaitDialog::OnCancel(wxCommandEvent&)
+{
+	m_timer.Stop();
+	EndModal(wxID_CANCEL);
+}
+
+void CemuPadPairingDialog::OnPinToggle(wxCommandEvent&)
+{
+	bool enabled = m_pinCheckbox->GetValue();
+	CemuPadBridge::GetInstance().SetRequirePin(enabled);
+	UpdatePinDisplay();
+}
+
+void CemuPadPairingDialog::UpdatePinDisplay()
+{
+	auto& bridge = CemuPadBridge::GetInstance();
+	bool pinRequired = bridge.IsPinRequired();
+	if (pinRequired)
+	{
+		uint32_t pin = bridge.GetCurrentPin();
+		if (pin == 0) pin = bridge.RegeneratePin();
+		m_pinLabel->SetLabel(wxString::Format("Session PIN: %06u", pin));
+	}
+	m_pinLabel->Show(pinRequired);
+	Layout();
 }

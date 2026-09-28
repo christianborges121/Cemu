@@ -16,6 +16,8 @@
 #include "Cemu/ncrypto/ncrypto.h"
 #include "wxgui/input/HotkeySettings.h"
 #include "streaming/CemuPadBridge.h"
+#include "streaming/DiscoveryServer.h"
+#include "wxgui/input/CemuPadPairingDialog.h"
 #include "wxgui/debugger/DebuggerWindow2.h"
 #include <wx/language.h>
 
@@ -385,6 +387,46 @@ bool CemuApp::OnInit()
 
 	SetTopWindow(m_mainFrame);
 	m_mainFrame->Show();
+
+	CemuPadBridge::GetInstance().SetPairingPromptHandler([this](const std::string& clientIp, uint32_t pin) {
+		CallAfter([this, clientIp, pin]() {
+			static std::atomic<bool> s_promptActive{false};
+			if (s_promptActive.exchange(true))
+				return;
+
+			try
+			{
+				wxWindow* parent = m_mainFrame ? static_cast<wxWindow*>(m_mainFrame) : GetTopWindow();
+				if (!parent)
+				{
+					s_promptActive.store(false);
+					return;
+				}
+
+				std::string deviceName = "Android Device";
+				for (const auto& dev : DiscoveryServer::GetInstance().GetDiscoveredDevices())
+				{
+					if (dev.ip == clientIp)
+					{
+						deviceName = dev.name;
+						break;
+					}
+				}
+
+				CemuPadPinWaitDialog dlg(parent, deviceName, clientIp, pin);
+				dlg.ShowModal();
+			}
+			catch (const std::exception& e)
+			{
+				cemuLog_log(LogType::Force, "CemuPad: Error displaying pairing dialog: {}", e.what());
+			}
+			catch (...)
+			{
+				cemuLog_log(LogType::Force, "CemuPad: Unknown error displaying pairing dialog");
+			}
+			s_promptActive.store(false);
+		});
+	});
 
 #if ( BOOST_OS_LINUX || BOOST_OS_BSD ) && HAS_WAYLAND
 	if (wxWlIsWaylandWindow(m_mainFrame))

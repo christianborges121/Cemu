@@ -1,11 +1,15 @@
 #include "Common/precompiled.h"
 #include "streaming/CemuPadBridge.h"
 #include "streaming/DiscoveryServer.h"
+#include "Cafe/HW/Latte/Renderer/VideoStreamServer.h"
 #include "Cemu/Logging/CemuLogging.h"
 #include "input/InputManager.h"
 #include "input/api/DSU/DSUControllerProvider.h"
 #include "input/api/DSU/DSUController.h"
 #include "input/emulated/VPADController.h"
+#include "config/ActiveSettings.h"
+#include <fstream>
+#include <boost/algorithm/string.hpp>
 
 CemuPadBridge& CemuPadBridge::GetInstance()
 {
@@ -15,27 +19,32 @@ CemuPadBridge& CemuPadBridge::GetInstance()
 
 void CemuPadBridge::Initialize()
 {
+	LoadPersistentTokens();
 	DiscoveryServer::GetInstance().Start(DiscoveryServer::kDefaultPort);
+	VideoStreamServer::GetInstance().Start(26761);
 	m_isActive = true;
+	if (m_requirePin.load() && m_currentPin.load() == 0)
+		RegeneratePin();
 	cemuLog_log(LogType::Force, "CemuPadBridge: Subsystem initialized (session PIN {})",
-		m_requirePin.load() ? "required" : "not required");
+		m_requirePin.load() ? fmt::format("required (PIN {:06d})", m_currentPin.load()) : "not required");
 }
 
 void CemuPadBridge::Shutdown()
 {
 	m_isActive = false;
 	{
-		std::lock_guard<std::mutex> lock(m_handlerMutex);
+		std::scoped_lock lock(m_handlerMutex);
 		m_frameHandler = nullptr;
 		m_audioHandler = nullptr;
 		m_rumbleHandler = nullptr;
 		m_rumbleClearHandler = nullptr;
 	}
 	{
-		std::lock_guard<std::mutex> lock(m_targetMutex);
+		std::scoped_lock lock(m_targetMutex);
 		m_streamingTarget.clear();
 	}
 	DiscoveryServer::GetInstance().Stop();
+	VideoStreamServer::GetInstance().Stop();
 	cemuLog_log(LogType::Force, "CemuPadBridge: Subsystem stopped");
 }
 
@@ -50,7 +59,7 @@ void CemuPadBridge::OnGamepadFrame(const uint8_t* rgbaPixels, uint32_t width, ui
 		return;
 	FrameHandler handler;
 	{
-		std::lock_guard<std::mutex> lock(m_handlerMutex);
+		std::scoped_lock lock(m_handlerMutex);
 		handler = m_frameHandler;
 	}
 	if (handler)
@@ -63,7 +72,7 @@ void CemuPadBridge::OnAudioDMA(const void* pcmData, size_t byteSize)
 		return;
 	AudioHandler handler;
 	{
-		std::lock_guard<std::mutex> lock(m_handlerMutex);
+		std::scoped_lock lock(m_handlerMutex);
 		handler = m_audioHandler;
 	}
 	if (handler)
@@ -76,7 +85,7 @@ void CemuPadBridge::OnVPADRumble(uint8_t channel, const uint8_t* pattern, uint8_
 		return;
 	RumbleHandler handler;
 	{
-		std::lock_guard<std::mutex> lock(m_handlerMutex);
+		std::scoped_lock lock(m_handlerMutex);
 		handler = m_rumbleHandler;
 	}
 	if (handler)
@@ -89,7 +98,7 @@ void CemuPadBridge::OnVPADClearRumble(uint8_t channel)
 		return;
 	RumbleClearHandler handler;
 	{
-		std::lock_guard<std::mutex> lock(m_handlerMutex);
+		std::scoped_lock lock(m_handlerMutex);
 		handler = m_rumbleClearHandler;
 	}
 	if (handler)
@@ -98,25 +107,25 @@ void CemuPadBridge::OnVPADClearRumble(uint8_t channel)
 
 void CemuPadBridge::SetFrameHandler(FrameHandler handler)
 {
-	std::lock_guard<std::mutex> lock(m_handlerMutex);
+	std::scoped_lock lock(m_handlerMutex);
 	m_frameHandler = std::move(handler);
 }
 
 void CemuPadBridge::SetAudioHandler(AudioHandler handler)
 {
-	std::lock_guard<std::mutex> lock(m_handlerMutex);
+	std::scoped_lock lock(m_handlerMutex);
 	m_audioHandler = std::move(handler);
 }
 
 void CemuPadBridge::SetRumbleHandler(RumbleHandler handler)
 {
-	std::lock_guard<std::mutex> lock(m_handlerMutex);
+	std::scoped_lock lock(m_handlerMutex);
 	m_rumbleHandler = std::move(handler);
 }
 
 void CemuPadBridge::SetRumbleClearHandler(RumbleClearHandler handler)
 {
-	std::lock_guard<std::mutex> lock(m_handlerMutex);
+	std::scoped_lock lock(m_handlerMutex);
 	m_rumbleClearHandler = std::move(handler);
 }
 
@@ -226,7 +235,7 @@ bool CemuPadBridge::StartStreaming(const std::string& clientIp)
 	if (clientIp.empty())
 		return false;
 	{
-		std::lock_guard<std::mutex> lock(m_targetMutex);
+		std::scoped_lock lock(m_targetMutex);
 		m_streamingTarget = clientIp;
 	}
 	m_isActive = true;
@@ -237,7 +246,7 @@ bool CemuPadBridge::StartStreaming(const std::string& clientIp)
 void CemuPadBridge::StopStreaming()
 {
 	{
-		std::lock_guard<std::mutex> lock(m_targetMutex);
+		std::scoped_lock lock(m_targetMutex);
 		m_streamingTarget.clear();
 	}
 	cemuLog_log(LogType::Force, "CemuPadBridge: Streaming session stopped");
@@ -245,7 +254,7 @@ void CemuPadBridge::StopStreaming()
 
 std::string CemuPadBridge::GetStreamingTarget() const
 {
-	std::lock_guard<std::mutex> lock(m_targetMutex);
+	std::scoped_lock lock(m_targetMutex);
 	return m_streamingTarget;
 }
 
@@ -253,7 +262,7 @@ void CemuPadBridge::QueueMicSamples(const int16_t* samples, size_t sampleCount)
 {
 	if (!samples || sampleCount == 0)
 		return;
-	std::lock_guard<std::mutex> lock(m_micMutex);
+	std::scoped_lock lock(m_micMutex);
 	for (size_t i = 0; i < sampleCount; ++i)
 	{
 		if (m_micQueue.size() >= kMicQueueCapSamples)
@@ -266,7 +275,7 @@ size_t CemuPadBridge::DequeueMicSamples(int16_t* outSamples, size_t maxSamples)
 {
 	if (!outSamples || maxSamples == 0)
 		return 0;
-	std::lock_guard<std::mutex> lock(m_micMutex);
+	std::scoped_lock lock(m_micMutex);
 	size_t count = 0;
 	while (count < maxSamples && !m_micQueue.empty())
 	{
@@ -278,7 +287,7 @@ size_t CemuPadBridge::DequeueMicSamples(int16_t* outSamples, size_t maxSamples)
 
 void CemuPadBridge::ClearMicQueue()
 {
-	std::lock_guard<std::mutex> lock(m_micMutex);
+	std::scoped_lock lock(m_micMutex);
 	m_micQueue.clear();
 }
 
@@ -293,7 +302,7 @@ void CemuPadBridge::SetRequirePin(bool required)
 		RegeneratePin();
 	m_requirePin.store(required);
 	cemuLog_log(LogType::Force, "CemuPadBridge: Session PIN {}",
-		required ? fmt::format("required (PIN {:04d})", m_currentPin.load()) : "not required");
+		required ? fmt::format("required (PIN {:06d})", m_currentPin.load()) : "not required");
 }
 
 uint32_t CemuPadBridge::GetCurrentPin() const
@@ -303,20 +312,45 @@ uint32_t CemuPadBridge::GetCurrentPin() const
 
 uint32_t CemuPadBridge::RegeneratePin()
 {
-	std::uniform_int_distribution<uint32_t> dist(1000, 9999);
+	std::uniform_int_distribution<uint32_t> dist(100000, 999999);
 	const uint32_t pin = dist(m_tokenRng);
 	m_currentPin.store(pin);
+	SavePersistentTokens();
 	return pin;
 }
 
-bool CemuPadBridge::Authenticate(uint64_t credential, uint64_t& outToken)
+bool CemuPadBridge::Authenticate(uint64_t credential, uint64_t& outToken, const std::string& clientIp)
 {
+	// Rate-limit: after 3 consecutive failures, lock out for 30 seconds.
+	if (m_authFailCount.load() >= 3)
+	{
+		auto now = std::chrono::steady_clock::now();
+		auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastAuthFail).count();
+		if (elapsed < 30)
+		{
+			cemuLog_log(LogType::Force, "CemuPadBridge: Auth rate-limited ({} seconds remaining)", 30 - elapsed);
+			outToken = 0;
+			return false;
+		}
+		m_authFailCount.store(0); // cooldown expired, reset
+	}
+
 	outToken = 0;
+
+	auto recordSuccess = [&]() {
+		std::scoped_lock lock(m_authSuccessMutex);
+		m_pairingSuccess.store(true);
+		if (!clientIp.empty())
+		{
+			m_lastPairedIp = clientIp;
+			m_authorizedIpSet.insert(clientIp);
+		}
+	};
 
 	auto issueToken = [&]() -> uint64_t {
 		uint64_t token;
 		{
-			std::lock_guard<std::mutex> lock(m_tokenMutex);
+			std::scoped_lock lock(m_tokenMutex);
 			do
 			{
 				token = m_tokenRng();
@@ -325,6 +359,7 @@ bool CemuPadBridge::Authenticate(uint64_t credential, uint64_t& outToken)
 			while (m_sessionTokens.size() > kMaxSessionTokens)
 				m_sessionTokens.erase(m_sessionTokens.begin());
 		}
+		SavePersistentTokens();
 		return token;
 	};
 
@@ -333,29 +368,245 @@ bool CemuPadBridge::Authenticate(uint64_t credential, uint64_t& outToken)
 	// paired if PIN protection is enabled later.
 	if (!m_requirePin.load())
 	{
+		m_authFailCount.store(0);
+		recordSuccess();
 		outToken = issueToken();
 		return true;
 	}
 
+	// Check if this IP has already been approved via "Allow Connection" on PC
+	if (!clientIp.empty())
 	{
-		std::lock_guard<std::mutex> lock(m_tokenMutex);
+		bool isAuthorizedIp = false;
+		{
+			std::scoped_lock lock(m_authSuccessMutex);
+			isAuthorizedIp = (m_authorizedIpSet.find(clientIp) != m_authorizedIpSet.end());
+		}
+
+		if (isAuthorizedIp)
+		{
+			m_authFailCount.store(0);
+			recordSuccess();
+			outToken = issueToken();
+			return true;
+		}
+	}
+
+	{
+		std::scoped_lock lock(m_tokenMutex);
 		for (uint64_t token : m_sessionTokens)
 		{
 			if (token != 0 && token == credential)
 			{
+				m_authFailCount.store(0);
+				recordSuccess();
 				outToken = token;
 				return true;
 			}
 		}
 	}
 
-	// Fresh pairing while required: accept the current 4-digit PIN.
+	// Fresh pairing while required: accept the current 6-digit PIN.
 	if (credential != 0 && credential == m_currentPin.load())
 	{
+		m_authFailCount.store(0);
+		recordSuccess();
 		outToken = issueToken();
 		return true;
 	}
+	if (credential != 0)
+	{
+		m_authFailCount.fetch_add(1);
+		m_lastAuthFail = std::chrono::steady_clock::now();
+	}
+	else
+	{
+		TriggerPairingPrompt(clientIp);
+	}
 	return false;
+}
+
+void CemuPadBridge::SetPairingPromptHandler(PairingPromptHandler handler)
+{
+	std::scoped_lock lock(m_promptMutex);
+	m_pairingPromptHandler = std::move(handler);
+}
+
+void CemuPadBridge::TriggerPairingPrompt(const std::string& clientIp)
+{
+	if (!m_requirePin.load() || clientIp.empty())
+		return;
+
+	if (IsClientAuthorized(clientIp))
+		return;
+
+	auto now = std::chrono::steady_clock::now();
+	bool shouldPrompt = false;
+	{
+		std::scoped_lock lock(m_promptMutex);
+		if (m_pairingPromptHandler)
+		{
+			auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastPromptTime).count();
+			if (elapsed >= 3 || m_lastPromptIp != clientIp)
+			{
+				m_lastPromptIp = clientIp;
+				m_lastPromptTime = now;
+				shouldPrompt = true;
+			}
+		}
+	}
+	if (shouldPrompt)
+	{
+		PairingPromptHandler handler;
+		{
+			std::scoped_lock lock(m_promptMutex);
+			handler = m_pairingPromptHandler;
+		}
+		if (handler)
+		{
+			try
+			{
+				handler(clientIp, GetCurrentPin());
+			}
+			catch (const std::exception& e)
+			{
+				cemuLog_log(LogType::Force, "CemuPadBridge: Exception in pairing prompt handler: {}", e.what());
+			}
+			catch (...)
+			{
+				cemuLog_log(LogType::Force, "CemuPadBridge: Unknown exception in pairing prompt handler");
+			}
+		}
+	}
+}
+
+void CemuPadBridge::AuthorizeClient(const std::string& clientIp)
+{
+	{
+		std::scoped_lock lock(m_authSuccessMutex);
+		m_pairingSuccess.store(true);
+		if (!clientIp.empty())
+		{
+			m_lastPairedIp = clientIp;
+			m_authorizedIpSet.insert(clientIp);
+		}
+	}
+	if (!clientIp.empty())
+	{
+		VideoStreamServer::GetInstance().AuthorizeClientIp(clientIp);
+		AutoConfigureDSUController(clientIp, 26760);
+		StartStreaming(clientIp);
+	}
+}
+
+bool CemuPadBridge::IsClientAuthorized(const std::string& ipStr) const
+{
+	if (!m_requirePin.load())
+		return true;
+	{
+		std::scoped_lock lock(m_authSuccessMutex);
+		if (ipStr.empty())
+		{
+			if (!m_authorizedIpSet.empty() || m_pairingSuccess.load())
+				return true;
+		}
+		else
+		{
+			if (m_authorizedIpSet.find(ipStr) != m_authorizedIpSet.end())
+				return true;
+		}
+	}
+	return VideoStreamServer::GetInstance().IsClientAuthorized(ipStr);
+}
+
+bool CemuPadBridge::HasRecentPairingSuccess() const
+{
+	return m_pairingSuccess.load();
+}
+
+void CemuPadBridge::ClearPairingSuccess()
+{
+	m_pairingSuccess.store(false);
+}
+
+std::string CemuPadBridge::GetLastPairedIp() const
+{
+	std::scoped_lock lock(m_authSuccessMutex);
+	return m_lastPairedIp;
+}
+
+void CemuPadBridge::LoadPersistentTokens()
+{
+	std::error_code ec;
+	auto filePath = ActiveSettings::GetConfigPath("cemupad_tokens.txt");
+	if (!fs::exists(filePath, ec))
+		return;
+
+	std::ifstream file(filePath);
+	if (!file.is_open())
+		return;
+
+	std::scoped_lock lock(m_tokenMutex);
+	m_sessionTokens.clear();
+	std::string line;
+	while (std::getline(file, line))
+	{
+		boost::trim(line);
+		if (line.empty() || line[0] == '#')
+			continue;
+		if (boost::starts_with(line, "pin="))
+		{
+			try
+			{
+				uint32_t pin = std::stoul(line.substr(4));
+				if (pin >= 100000 && pin <= 999999)
+					m_currentPin.store(pin);
+			}
+			catch (...) {}
+		}
+		else if (boost::starts_with(line, "token="))
+		{
+			try
+			{
+				uint64_t token = std::stoull(line.substr(6), nullptr, 16);
+				if (token != 0)
+					m_sessionTokens.push_back(token);
+			}
+			catch (...) {}
+		}
+		else
+		{
+			try
+			{
+				uint64_t token = std::stoull(line, nullptr, 16);
+				if (token != 0)
+					m_sessionTokens.push_back(token);
+			}
+			catch (...) {}
+		}
+	}
+	cemuLog_log(LogType::Force, "CemuPadBridge: Loaded persistent PIN {:06d} and {} session token(s)",
+		m_currentPin.load(), m_sessionTokens.size());
+}
+
+void CemuPadBridge::SavePersistentTokens()
+{
+	try
+	{
+		auto filePath = ActiveSettings::GetConfigPath("cemupad_tokens.txt");
+		std::ofstream file(filePath, std::ios::trunc);
+		if (!file.is_open())
+			return;
+
+		std::scoped_lock lock(m_tokenMutex);
+		file << "# CemuPad paired session tokens and PIN (auto-generated)\n";
+		file << fmt::format("pin={:06d}\n", m_currentPin.load());
+		for (uint64_t token : m_sessionTokens)
+		{
+			file << fmt::format("token={:016x}\n", token);
+		}
+	}
+	catch (...) {}
 }
 
 bool CemuPadBridge::ApplyPushedMappings(const std::vector<std::pair<uint64, uint64>>& entries, bool clearExisting)

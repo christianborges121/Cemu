@@ -600,11 +600,24 @@ bool VideoEncoder::EncodeFrame(const uint8* pixels, uint32 width, uint32 height,
 
 								if (offset != 0 && offset < scanLimit)
 								{
-									uint8 nalType = pBytes[offset] & 0x1F;
-									if (nalType == 5 || nalType == 7)
+									if (m_codec == VideoCodec::HEVC)
 									{
-										hasIdr = true;
-										break;
+										uint8 nalType = (pBytes[offset] >> 1) & 0x3F;
+										// 19: IDR_W_RADL, 20: IDR_N_LP, 21: CRA_NUT, 32: VPS, 33: SPS
+										if (nalType == 19 || nalType == 20 || nalType == 21 || nalType == 32 || nalType == 33)
+										{
+											hasIdr = true;
+											break;
+										}
+									}
+									else
+									{
+										uint8 nalType = pBytes[offset] & 0x1F;
+										if (nalType == 5 || nalType == 7)
+										{
+											hasIdr = true;
+											break;
+										}
 									}
 								}
 							}

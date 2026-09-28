@@ -2,6 +2,7 @@
 
 #include "Common/precompiled.h"
 #include <vector>
+#include <set>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -46,6 +47,8 @@ public:
 	void Stop();
 
 	bool HasActiveClient() const;
+	bool IsClientAuthorized(const std::string& ipStr = "") const;
+	void AuthorizeClientIp(const std::string& ipStr);
 	void BroadcastFrame(uint8 packetType, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe);
 	void BroadcastRumble(bool active, uint8 intensity = 255, uint16 durationMs = 50);
 	void BroadcastAudio(const void* data, size_t size);
@@ -86,6 +89,7 @@ public:
 	static constexpr size_t UDP_RAW_CHUNK = 1360;
 	static constexpr size_t UDP_BLOCK_SIZE = UDP_RAW_CHUNK + 2; // 1362 bytes (2-byte chunkLen prefix + data)
 	static constexpr size_t UDP_MAX_PAYLOAD = 1400;
+	static constexpr size_t MAX_CLIENTS = 4;
 
 private:
 	VideoStreamServer();
@@ -95,6 +99,7 @@ private:
 	void ClientRxThreadFunc(uintptr_t clientSocket);
 	void MicRxThreadFunc();
 	void SetClientAuthorized(uintptr_t clientSocket, bool authorized);
+	void RemoveClient(uintptr_t clientSocket);
 	void SendUdpFrame(const sockaddr_in& destAddr, uint64 ptsUs, const uint8* data, size_t size, bool isKeyframe);
 
 	struct ClientInfo
@@ -120,8 +125,14 @@ private:
 	std::atomic<uint64> m_udpPackets{ 0 };
 	std::atomic<uint64> m_udpSendErrors{ 0 };
 	std::chrono::steady_clock::time_point m_lastBitrateAdapt{ std::chrono::steady_clock::now() };
+	std::chrono::steady_clock::time_point m_lastMappingPush{ std::chrono::steady_clock::now() };
 	std::atomic<uint32> m_adaptiveBitrate{ 6000000 };
 
 	mutable std::mutex m_clientsMutex;
 	std::vector<ClientInfo> m_clients;
+
+	// Set of authorized client IPs (uint32 host-order) for mic UDP filtering.
+	// Updated when clients authenticate or disconnect.
+	mutable std::mutex m_authorizedIpsMutex;
+	std::set<uint32_t> m_authorizedIps;
 };

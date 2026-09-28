@@ -29,11 +29,17 @@ void StreamingCapture::Initialize()
 
 	m_startTime = std::chrono::steady_clock::now();
 	VideoStreamServer::GetInstance().Start(26761);
-	VideoEncoder::GetInstance().Initialize(854, 480, 60, 6000000);
+	const auto& enc = VideoEncoder::GetInstance();
+	const uint32 width = enc.GetWidth() > 0 ? enc.GetWidth() : 854;
+	const uint32 height = enc.GetHeight() > 0 ? enc.GetHeight() : 480;
+	const uint32 bitrate = enc.GetBitrate() > 0 ? enc.GetBitrate() : 6000000;
+	const VideoCodec codec = enc.GetCodec();
+	VideoEncoder::GetInstance().Initialize(width, height, 60, bitrate, codec);
 	m_isInitialized = true;
 	m_workerStopping = false;
 	m_workerThread = std::thread(&StreamingCapture::EncodeWorker, this);
-	cemuLog_log(LogType::Force, "StreamingCapture: Initialized and listening for GamePad streaming connections");
+	cemuLog_log(LogType::Force, "StreamingCapture: Initialized ({}x{}, {} bps, {}) and listening for GamePad streaming connections",
+		width, height, bitrate, (codec == VideoCodec::HEVC) ? "HEVC" : "H.264");
 }
 
 void StreamingCapture::Shutdown()
@@ -47,7 +53,7 @@ void StreamingCapture::Shutdown()
 	if (m_workerThread.joinable())
 		m_workerThread.join();
 
-	VideoStreamServer::GetInstance().Stop();
+	// Note: VideoStreamServer lifecycle is managed by CemuPadBridge to retain client pairing across games.
 	VideoEncoder::GetInstance().Shutdown();
 	cemuLog_log(LogType::Force, "StreamingCapture: Shutdown complete");
 }
@@ -110,6 +116,9 @@ void StreamingCapture::ProcessFramePixels(const uint8* pixels, uint32 width, uin
 
 void StreamingCapture::EncodeWorker()
 {
+#if defined(_WIN32)
+	CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 	while (true)
 	{
 		CapturedFrame frame;
@@ -117,7 +126,7 @@ void StreamingCapture::EncodeWorker()
 			std::unique_lock<std::mutex> lock(m_queueMutex);
 			m_queueCondition.wait(lock, [this] { return m_workerStopping || !m_frameQueue.empty(); });
 			if (m_workerStopping && m_frameQueue.empty())
-				return;
+				break;
 			frame = std::move(m_frameQueue.front());
 			m_frameQueue.pop_front();
 		}
@@ -140,4 +149,7 @@ void StreamingCapture::EncodeWorker()
 			}
 		}
 	}
+#if defined(_WIN32)
+	CoUninitialize();
+#endif
 }
