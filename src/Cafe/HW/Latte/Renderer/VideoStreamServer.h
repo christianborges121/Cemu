@@ -38,10 +38,12 @@ inline void CloseSocket(SOCKET s)
 	}
 }
 
-class VideoStreamServer
+#include "util/helpers/Singleton.h"
+
+class VideoStreamServer : public Singleton<VideoStreamServer>
 {
+	friend class Singleton<VideoStreamServer>;
 public:
-	static VideoStreamServer& GetInstance();
 
 	bool Start(uint16 port = 26761);
 	void Stop();

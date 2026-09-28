@@ -15,9 +15,9 @@ CemuPadPairingDialog::CemuPadPairingDialog(wxWindow* parent)
 {
 	InitUI();
 	// Make sure the isolated discovery responder owns UDP 26763, then probe.
-	DiscoveryServer::GetInstance().Start(DiscoveryServer::kDefaultPort);
-	VideoStreamServer::GetInstance().Start(26761);
-	DiscoveryServer::GetInstance().BroadcastProbe();
+	DiscoveryServer::instance().Start(DiscoveryServer::kDefaultPort);
+	VideoStreamServer::instance().Start(26761);
+	DiscoveryServer::instance().BroadcastProbe();
 	RefreshDeviceList();
 	m_pollTimer.Bind(wxEVT_TIMER, &CemuPadPairingDialog::OnTimer, this);
 	m_pollTimer.Start(1000);
@@ -46,7 +46,7 @@ void CemuPadPairingDialog::InitUI()
 	rootSizer->Add(m_statusText, 0, wxALL, 10);
 
 	// Session PIN security
-	auto& bridge = CemuPadBridge::GetInstance();
+	auto& bridge = CemuPadBridge::instance();
 	m_pinCheckbox = new wxCheckBox(this, wxID_ANY, "Require PIN to connect");
 	m_pinCheckbox->SetValue(bridge.IsPinRequired());
 	m_pinCheckbox->Bind(wxEVT_CHECKBOX, &CemuPadPairingDialog::OnPinToggle, this);
@@ -88,7 +88,7 @@ void CemuPadPairingDialog::InitUI()
 
 void CemuPadPairingDialog::OnRescanClicked(wxCommandEvent&)
 {
-	DiscoveryServer::GetInstance().BroadcastProbe();
+	DiscoveryServer::instance().BroadcastProbe();
 	RefreshDeviceList();
 }
 
@@ -98,9 +98,9 @@ void CemuPadPairingDialog::OnTimer(wxTimerEvent&)
 	// Re-probe while open: phones stop broadcasting once video streams, so a
 	// one-shot probe would let entries expire (30s) and strand the dialog.
 	if (++m_pollTicks % 5 == 0)
-		DiscoveryServer::GetInstance().BroadcastProbe();
+		DiscoveryServer::instance().BroadcastProbe();
 
-	auto& bridge = CemuPadBridge::GetInstance();
+	auto& bridge = CemuPadBridge::instance();
 	if (bridge.HasRecentPairingSuccess())
 	{
 		bridge.ClearPairingSuccess();
@@ -135,7 +135,7 @@ void CemuPadPairingDialog::OnTimer(wxTimerEvent&)
 
 void CemuPadPairingDialog::RefreshDeviceList()
 {
-	auto devices = DiscoveryServer::GetInstance().GetDiscoveredDevices();
+	auto devices = DiscoveryServer::instance().GetDiscoveredDevices();
 
 	// Preserve selection across refreshes.
 	std::string selectedIp;
@@ -182,7 +182,7 @@ void CemuPadPairingDialog::OnPairClicked(wxCommandEvent&)
 
 	const DeviceEntry entry = m_devices[static_cast<size_t>(sel)];
 
-	auto& bridge = CemuPadBridge::GetInstance();
+	auto& bridge = CemuPadBridge::instance();
 	bridge.ClearPairingSuccess();
 	if (bridge.IsPinRequired() && !bridge.IsClientAuthorized(entry.ip))
 	{
@@ -275,7 +275,7 @@ CemuPadPinWaitDialog::~CemuPadPinWaitDialog()
 void CemuPadPinWaitDialog::OnTimer(wxTimerEvent&)
 {
 	m_ticks++;
-	auto& bridge = CemuPadBridge::GetInstance();
+	auto& bridge = CemuPadBridge::instance();
 	if (bridge.IsClientAuthorized(m_ip) || bridge.IsClientAuthorized("") || bridge.HasRecentPairingSuccess())
 	{
 		m_timer.Stop();
@@ -303,7 +303,7 @@ void CemuPadPinWaitDialog::OnTimer(wxTimerEvent&)
 void CemuPadPinWaitDialog::OnAllow(wxCommandEvent&)
 {
 	m_timer.Stop();
-	auto& bridge = CemuPadBridge::GetInstance();
+	auto& bridge = CemuPadBridge::instance();
 	bridge.AuthorizeClient(m_ip);
 	m_statusLabel->SetForegroundColour(wxColour(0, 160, 60));
 	m_statusLabel->SetLabel("Connection allowed! Pairing complete.");
@@ -319,13 +319,13 @@ void CemuPadPinWaitDialog::OnCancel(wxCommandEvent&)
 void CemuPadPairingDialog::OnPinToggle(wxCommandEvent&)
 {
 	bool enabled = m_pinCheckbox->GetValue();
-	CemuPadBridge::GetInstance().SetRequirePin(enabled);
+	CemuPadBridge::instance().SetRequirePin(enabled);
 	UpdatePinDisplay();
 }
 
 void CemuPadPairingDialog::UpdatePinDisplay()
 {
-	auto& bridge = CemuPadBridge::GetInstance();
+	auto& bridge = CemuPadBridge::instance();
 	bool pinRequired = bridge.IsPinRequired();
 	if (pinRequired)
 	{

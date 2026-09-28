@@ -310,4 +310,4 @@ namespace nn
 			return g_IsInitialized;
 		}
 	}
-}
+}

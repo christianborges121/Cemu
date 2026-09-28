@@ -43,11 +43,7 @@ inline void SetSocketRecvTimeout(SOCKET s, int timeoutMs)
 }
 }
 
-VideoStreamServer& VideoStreamServer::GetInstance()
-{
-	static VideoStreamServer s_instance;
-	return s_instance;
-}
+
 
 VideoStreamServer::VideoStreamServer()
 {
@@ -562,12 +558,12 @@ void VideoStreamServer::ServerThreadFunc()
 			info.useUdp = false;
 			// PIN disabled (default): clients stream immediately. Otherwise
 			// they stay muted until OPCODE_AUTH_REQUEST succeeds.
-			info.authorized = !CemuPadBridge::GetInstance().IsPinRequired();
+			info.authorized = !CemuPadBridge::instance().IsPinRequired();
 			m_clients.push_back(info);
 		}
 
 		// Request an immediate keyframe so the client can begin decoding right away
-		StreamingCapture::GetInstance().RequestKeyframe();
+		StreamingCapture::instance().RequestKeyframe();
 
 		// Spawn detached thread to listen for reverse control packets
 		std::thread(&VideoStreamServer::ClientRxThreadFunc, this, (uintptr_t)clientSock).detach();
@@ -706,7 +702,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 		if (opcode == OPCODE_IDR_REQUEST)
 		{
 			cemuLog_log(LogType::Force, "VideoStreamServer: Received IDR_REQUEST opcode (0x10) from Android client!");
-			StreamingCapture::GetInstance().RequestKeyframe();
+			StreamingCapture::instance().RequestKeyframe();
 		}
 		else if (opcode == OPCODE_AUTH_REQUEST)
 		{
@@ -718,7 +714,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 			for (int i = 0; i < 8; ++i)
 				credential |= (static_cast<uint64>(payload[i]) << (i * 8));
 			uint64 token = 0;
-			const bool ok = CemuPadBridge::GetInstance().Authenticate(credential, token);
+			const bool ok = CemuPadBridge::instance().Authenticate(credential, token);
 			uint8 response[9];
 			response[0] = ok ? 0x00 : 0x01;
 			for (int i = 0; i < 8; ++i)
@@ -749,7 +745,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 					break;
 				}
 			}
-			StreamingCapture::GetInstance().RequestKeyframe();
+			StreamingCapture::instance().RequestKeyframe();
 		}
 		else if (opcode == OPCODE_MIC_BLOW)
 		{
@@ -868,7 +864,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 				uint32 button = static_cast<uint32>(buf[i * 8 + 4]) | (static_cast<uint32>(buf[i * 8 + 5]) << 8) | (static_cast<uint32>(buf[i * 8 + 6]) << 16) | (static_cast<uint32>(buf[i * 8 + 7]) << 24);
 				entries.emplace_back(mapping, button);
 			}
-			bool ok = CemuPadBridge::GetInstance().ApplyPushedMappings(entries, true);
+			bool ok = CemuPadBridge::instance().ApplyPushedMappings(entries, true);
 			uint8 status = ok ? 0x00 : 0x01;
 			send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
 			cemuLog_log(LogType::Force, "VideoStreamServer: PUSH_MAPPINGS {} entries -> {}", count, ok ? "OK" : "FAIL");
@@ -879,7 +875,7 @@ void VideoStreamServer::ClientRxThreadFunc(uintptr_t clientSocket)
 			if (!readExact(payload, sizeof(payload))) break;
 			uint32 mapping = static_cast<uint32>(payload[0]) | (static_cast<uint32>(payload[1]) << 8) | (static_cast<uint32>(payload[2]) << 16) | (static_cast<uint32>(payload[3]) << 24);
 			uint32 button = static_cast<uint32>(payload[4]) | (static_cast<uint32>(payload[5]) << 8) | (static_cast<uint32>(payload[6]) << 16) | (static_cast<uint32>(payload[7]) << 24);
-			bool ok = CemuPadBridge::GetInstance().ApplyPushedMappings({{mapping, button}}, false);
+			bool ok = CemuPadBridge::instance().ApplyPushedMappings({{mapping, button}}, false);
 			uint8 status = ok ? 0x00 : 0x01;
 			send(s, reinterpret_cast<const char*>(&status), 1, kSendFlags);
 		}
@@ -956,7 +952,7 @@ void VideoStreamServer::MicRxThreadFunc()
 		if (sampleCount == 0 || sampleCount * sizeof(int16_t) > static_cast<size_t>(bytes - 8))
 			continue;
 
-		CemuPadBridge::GetInstance().QueueMicSamples(
+		CemuPadBridge::instance().QueueMicSamples(
 			reinterpret_cast<const int16_t*>(buffer + 8), static_cast<size_t>(sampleCount));
 	}
 

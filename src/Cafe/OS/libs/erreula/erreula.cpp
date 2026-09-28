@@ -1,4 +1,4 @@
-﻿#include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/OS/common/OSCommon.h"
 #include "erreula.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "util/helpers/helpers.h"

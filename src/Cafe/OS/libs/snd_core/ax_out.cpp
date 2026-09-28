@@ -339,8 +339,8 @@ namespace snd_core
 			if (g_padAudio)
 				g_padAudio->FeedBlock(tempDRCChannelData);
 
-			VideoStreamServer::GetInstance().BroadcastAudio(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * outChannels * sizeof(sint16));
-			CemuPadBridge::GetInstance().OnAudioDMA(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * outChannels * sizeof(sint16));
+			VideoStreamServer::instance().BroadcastAudio(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * outChannels * sizeof(sint16));
+			CemuPadBridge::instance().OnAudioDMA(tempDRCChannelData, AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP * outChannels * sizeof(sint16));
 
 			tempDRCAudioBlockCounter = 0;
 		}

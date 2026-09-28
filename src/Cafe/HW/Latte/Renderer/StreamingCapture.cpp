@@ -7,11 +7,7 @@
 #include "Cafe/HW/Latte/Core/LatteTextureView.h"
 #include "Cemu/Logging/CemuLogging.h"
 
-StreamingCapture& StreamingCapture::GetInstance()
-{
-	static StreamingCapture s_instance;
-	return s_instance;
-}
+
 
 StreamingCapture::StreamingCapture()
 {
@@ -28,7 +24,7 @@ void StreamingCapture::Initialize()
 		return;
 
 	m_startTime = std::chrono::steady_clock::now();
-	VideoStreamServer::GetInstance().Start(26761);
+	VideoStreamServer::instance().Start(26761);
 	const auto& enc = VideoEncoder::GetInstance();
 	const uint32 width = enc.GetWidth() > 0 ? enc.GetWidth() : 854;
 	const uint32 height = enc.GetHeight() > 0 ? enc.GetHeight() : 480;
@@ -63,7 +59,7 @@ bool StreamingCapture::IsStreamingActive() const
 	if (!m_isInitialized)
 		return false;
 
-	return VideoStreamServer::GetInstance().HasActiveClient();
+	return VideoStreamServer::instance().HasActiveClient();
 }
 
 void StreamingCapture::RequestKeyframe()
@@ -88,7 +84,7 @@ void StreamingCapture::ProcessFramePixels(const uint8* pixels, uint32 width, uin
 	auto now = std::chrono::steady_clock::now();
 	const uint64 ptsUs = static_cast<uint64>(std::chrono::duration_cast<std::chrono::microseconds>(now - m_startTime).count());
 	// Non-invasive delegate: no-op until a frame handler is registered (Phase 4.0 follow-up).
-	CemuPadBridge::GetInstance().OnGamepadFrame(pixels, width, height, ptsUs);
+	CemuPadBridge::instance().OnGamepadFrame(pixels, width, height, ptsUs);
 	CapturedFrame frame;
 	frame.width = width;
 	frame.height = height;
@@ -137,7 +133,7 @@ void StreamingCapture::EncodeWorker()
 		bool encodedAny = VideoEncoder::GetInstance().EncodeFrame(
 			frame.pixels.data(), frame.width, frame.height, frame.pitch, frame.pixelFormat, frame.ptsUs, false,
 			[](const uint8* data, size_t size, uint64 ptsUs, bool isKeyframe) {
-				VideoStreamServer::GetInstance().BroadcastFrame(0x01, ptsUs, data, size, isKeyframe);
+				VideoStreamServer::instance().BroadcastFrame(0x01, ptsUs, data, size, isKeyframe);
 			}
 		);
 		if (!encodedAny)

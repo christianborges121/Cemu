@@ -1009,7 +1009,7 @@ bool VulkanRenderer::IsPadWindowActive()
 
 void VulkanRenderer::HandleStreamingCapture(LatteTextureView* texView)
 {
-	if (!StreamingCapture::GetInstance().IsStreamingActive() || !texView)
+	if (!StreamingCapture::instance().IsStreamingActive() || !texView)
 		return;
 
 	auto texViewVk = (LatteTextureViewVk*)texView;
@@ -1115,7 +1115,7 @@ void VulkanRenderer::HandleStreamingCapture(LatteTextureView* texView)
 	// Process the previous frame's buffer (pipeline DMA complete, zero stall)
 	if (s_frameCount > 1 && s_mappedPtrs[readIdx] && s_commandBufferIds[readIdx] != 0 && HasCommandBufferFinished(s_commandBufferIds[readIdx]))
 	{
-		StreamingCapture::GetInstance().ProcessFramePixels(
+		StreamingCapture::instance().ProcessFramePixels(
 			(const uint8*)s_mappedPtrs[readIdx],
 			s_widths[readIdx],
 			s_heights[readIdx],

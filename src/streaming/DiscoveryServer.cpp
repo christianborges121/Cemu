@@ -70,11 +70,7 @@ namespace
 	}
 }
 
-DiscoveryServer& DiscoveryServer::GetInstance()
-{
-	static DiscoveryServer s_instance;
-	return s_instance;
-}
+
 
 bool DiscoveryServer::IsRunning() const
 {

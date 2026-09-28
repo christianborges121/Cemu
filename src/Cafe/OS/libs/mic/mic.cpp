@@ -442,13 +442,13 @@ void mic_updateOnAXFrame()
 		sint16 micSampleData[micSampleCount];
 
 		auto controller = InputManager::instance().get_vpad_controller(drcIndex);
-		if( (controller && controller->is_mic_active()) || VideoStreamServer::GetInstance().IsMicBlowActive() )
+		if( (controller && controller->is_mic_active()) || VideoStreamServer::instance().IsMicBlowActive() )
 		{
 			memset(micSampleData, 0x00, sizeof(micSampleData));
 			// Prefer live phone microphone PCM when the CemuPad app is
 			// streaming voice; fall back to the synthetic test tone when the
 			// queue is dry (preserves prior behavior for non-voice clients).
-			const size_t queuedSamples = CemuPadBridge::GetInstance().DequeueMicSamples(
+			const size_t queuedSamples = CemuPadBridge::instance().DequeueMicSamples(
 				reinterpret_cast<int16_t*>(micSampleData), static_cast<size_t>(micSampleCount));
 			if (queuedSamples == 0)
 			{

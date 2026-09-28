@@ -85,7 +85,7 @@ void EmulatedController::start_rumble()
 	}
 	if (type() != VPAD)
 	{
-		VideoStreamServer::GetInstance().BroadcastRumble(true, 255, 60);
+		VideoStreamServer::instance().BroadcastRumble(true, 255, 60);
 	}
 }
 
@@ -103,7 +103,7 @@ void EmulatedController::stop_rumble()
 	}
 	if (type() != VPAD)
 	{
-		VideoStreamServer::GetInstance().BroadcastRumble(false, 0, 0);
+		VideoStreamServer::instance().BroadcastRumble(false, 0, 0);
 	}
 }
 

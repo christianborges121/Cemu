@@ -10,12 +10,14 @@
 #include <vector>
 #include "Cafe/HW/Latte/Renderer/VideoPixelFormat.h"
 
+#include "util/helpers/Singleton.h"
+
 class LatteTextureView;
 
-class StreamingCapture
+class StreamingCapture : public Singleton<StreamingCapture>
 {
+	friend class Singleton<StreamingCapture>;
 public:
-	static StreamingCapture& GetInstance();
 
 	void Initialize();
 	void Shutdown();

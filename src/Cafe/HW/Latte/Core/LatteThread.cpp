@@ -122,7 +122,7 @@ int Latte_ThreadEntry()
 	// renderer
 	g_renderer->Initialize();
 	RendererOutputShader::InitializeStatic();
-	StreamingCapture::GetInstance().Initialize();
+	StreamingCapture::instance().Initialize();
 
 	LatteTiming_Init();
 	LatteTexture_init();
@@ -250,7 +250,7 @@ bool Latte_GetStopSignal()
 
 void LatteThread_Exit()
 {
-	StreamingCapture::GetInstance().Shutdown();
+	StreamingCapture::instance().Shutdown();
 	if (g_renderer)
 		g_renderer->Shutdown();
     // clean up vertex/uniform cache

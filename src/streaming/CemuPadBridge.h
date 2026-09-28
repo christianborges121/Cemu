@@ -24,11 +24,12 @@
 #include <string>
 #include <vector>
 
-class CemuPadBridge
-{
-public:
-	static CemuPadBridge& GetInstance();
+#include "util/helpers/Singleton.h"
 
+class CemuPadBridge : public Singleton<CemuPadBridge>
+{
+	friend class Singleton<CemuPadBridge>;
+public:
 	void Initialize();
 	void Shutdown();
 	bool IsActive() const;

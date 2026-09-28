@@ -349,7 +349,7 @@ bool CemuApp::OnInit()
 	// Start the isolated CemuPad subsystem early so phones discover this PC
 	// (UDP 26763 responder) even before any game loads or dialog opens.
 	// Media delegates stay no-ops until streaming handlers register.
-	CemuPadBridge::GetInstance().Initialize();
+	CemuPadBridge::instance().Initialize();
 
 #if BOOST_OS_MACOS
 	m_sdlEventPumpTimer = new wxTimer(this);
@@ -388,7 +388,7 @@ bool CemuApp::OnInit()
 	SetTopWindow(m_mainFrame);
 	m_mainFrame->Show();
 
-	CemuPadBridge::GetInstance().SetPairingPromptHandler([this](const std::string& clientIp, uint32_t pin) {
+	CemuPadBridge::instance().SetPairingPromptHandler([this](const std::string& clientIp, uint32_t pin) {
 		CallAfter([this, clientIp, pin]() {
 			static std::atomic<bool> s_promptActive{false};
 			if (s_promptActive.exchange(true))
@@ -404,7 +404,7 @@ bool CemuApp::OnInit()
 				}
 
 				std::string deviceName = "Android Device";
-				for (const auto& dev : DiscoveryServer::GetInstance().GetDiscoveredDevices())
+				for (const auto& dev : DiscoveryServer::instance().GetDiscoveredDevices())
 				{
 					if (dev.ip == clientIp)
 					{
@@ -450,7 +450,7 @@ int CemuApp::OnExit()
 	wxApp::OnExit();
 	wxTheClipboard->Flush();
 	InputManager::instance().Shutdown();
-	CemuPadBridge::GetInstance().Shutdown();
+	CemuPadBridge::instance().Shutdown();
 	int retValue = 0;
 	if (auto r = CafeSystem::GetForegroundTitleReturnStatus(); (LaunchSettings::GetLoadFile() || LaunchSettings::GetLoadTitleID()) && r)
 		retValue = *r;

@@ -29,10 +29,12 @@ struct DiscoveredDevice
 	std::chrono::steady_clock::time_point lastSeen{};
 };
 
-class DiscoveryServer
+#include "util/helpers/Singleton.h"
+
+class DiscoveryServer : public Singleton<DiscoveryServer>
 {
+	friend class Singleton<DiscoveryServer>;
 public:
-	static DiscoveryServer& GetInstance();
 
 	static constexpr uint16_t kDefaultPort = 26763;
 	static constexpr uint16_t kDsuPort = 26760;

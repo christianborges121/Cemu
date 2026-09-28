@@ -1,4 +1,4 @@
-﻿#include "input/api/ControllerState.h"
+#include "input/api/ControllerState.h"
 
 bool ControllerState::operator==(const ControllerState& other) const
 {

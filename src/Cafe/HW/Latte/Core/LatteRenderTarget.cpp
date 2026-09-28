@@ -1011,7 +1011,7 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 
 	bool showDRC = swkbd_hasKeyboardInputHook() == false && (isDRCPrimary ^ altScreenRequested);
 
-	if ((renderTarget & RENDER_TARGET_DRC) && (g_renderer->IsPadWindowActive() || StreamingCapture::GetInstance().IsStreamingActive()))
+	if ((renderTarget & RENDER_TARGET_DRC) && (g_renderer->IsPadWindowActive() || StreamingCapture::instance().IsStreamingActive()))
 		LatteRenderTarget_copyToBackbuffer(texView, true);
 	if (((renderTarget & RENDER_TARGET_TV) && !showDRC) || ((renderTarget & RENDER_TARGET_DRC) && showDRC))
 		LatteRenderTarget_copyToBackbuffer(texView, false);

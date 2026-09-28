@@ -584,7 +584,7 @@ void OpenGLRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
 
 void OpenGLRenderer::HandleStreamingCapture(LatteTextureView* texView)
 {
-	if (!StreamingCapture::GetInstance().IsStreamingActive() || !texView)
+	if (!StreamingCapture::instance().IsStreamingActive() || !texView)
 		return;
 
 	int width = 0, height = 0;
@@ -645,7 +645,7 @@ void OpenGLRenderer::HandleStreamingCapture(LatteTextureView* texView)
 		void* mapped = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
 		if (mapped)
 		{
-			StreamingCapture::GetInstance().ProcessFramePixels(
+			StreamingCapture::instance().ProcessFramePixels(
 				reinterpret_cast<const uint8*>(mapped),
 				s_widths[readIdx],
 				s_heights[readIdx],

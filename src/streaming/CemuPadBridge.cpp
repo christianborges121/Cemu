@@ -11,17 +11,12 @@
 #include <fstream>
 #include <boost/algorithm/string.hpp>
 
-CemuPadBridge& CemuPadBridge::GetInstance()
-{
-	static CemuPadBridge s_instance;
-	return s_instance;
-}
 
 void CemuPadBridge::Initialize()
 {
 	LoadPersistentTokens();
-	DiscoveryServer::GetInstance().Start(DiscoveryServer::kDefaultPort);
-	VideoStreamServer::GetInstance().Start(26761);
+	DiscoveryServer::instance().Start(DiscoveryServer::kDefaultPort);
+	VideoStreamServer::instance().Start(26761);
 	m_isActive = true;
 	if (m_requirePin.load() && m_currentPin.load() == 0)
 		RegeneratePin();
@@ -43,8 +38,8 @@ void CemuPadBridge::Shutdown()
 		std::scoped_lock lock(m_targetMutex);
 		m_streamingTarget.clear();
 	}
-	DiscoveryServer::GetInstance().Stop();
-	VideoStreamServer::GetInstance().Stop();
+	DiscoveryServer::instance().Stop();
+	VideoStreamServer::instance().Stop();
 	cemuLog_log(LogType::Force, "CemuPadBridge: Subsystem stopped");
 }
 
@@ -493,7 +488,7 @@ void CemuPadBridge::AuthorizeClient(const std::string& clientIp)
 	}
 	if (!clientIp.empty())
 	{
-		VideoStreamServer::GetInstance().AuthorizeClientIp(clientIp);
+		VideoStreamServer::instance().AuthorizeClientIp(clientIp);
 		AutoConfigureDSUController(clientIp, 26760);
 		StartStreaming(clientIp);
 	}
@@ -516,7 +511,7 @@ bool CemuPadBridge::IsClientAuthorized(const std::string& ipStr) const
 				return true;
 		}
 	}
-	return VideoStreamServer::GetInstance().IsClientAuthorized(ipStr);
+	return VideoStreamServer::instance().IsClientAuthorized(ipStr);
 }
 
 bool CemuPadBridge::HasRecentPairingSuccess() const
