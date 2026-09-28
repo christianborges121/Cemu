@@ -20,7 +20,7 @@
 
 #define _CRLF	"\r\n"
 
-void LatteDecompiler_emitAttributeDecodeMSL(LatteDecompilerShader* shaderContext, StringBuf* src, LatteParsedFetchShaderAttribute_t* attrib);
+void LatteDecompiler_emitAttributeDecodeMSL(LatteDecompilerShader* shaderContext, StringBuf* src, LatteParsedFetchShaderAttribute* attrib);
 
 /*
  * Variable names:
@@ -1018,7 +1018,7 @@ static void _emitALUOP2InstructionCode(LatteDecompilerShaderContext* shaderConte
 		_emitOperandInputCode(shaderContext, aluInstruction, 0, LATTE_DECOMPILER_DTYPE_FLOAT);
 		src->add(";" _CRLF);
 		src->add("tempResultf = floor(tempResultf);" _CRLF);
-		src->add("tempResultf = clamp(tempResultf, -256.0, 255.0);" _CRLF);
+		src->add("tempResultf = (tempResultf >= -256.0 && tempResultf <= 255.0) ? tempResultf : -256.0;" _CRLF);
 		// set AR
 		if( aluInstruction->destElem == 0 )
 			src->add("ARi.x = int(tempResultf);" _CRLF);
@@ -1043,7 +1043,7 @@ static void _emitALUOP2InstructionCode(LatteDecompilerShaderContext* shaderConte
 		src->add("tempResulti = ");
 		_emitOperandInputCode(shaderContext, aluInstruction, 0, LATTE_DECOMPILER_DTYPE_SIGNED_INT);
 		src->add(";" _CRLF);
-		src->add("tempResulti = clamp(tempResulti, -256, 255);" _CRLF);
+		src->add("tempResulti = (tempResulti >= -256 && tempResulti <= 255) ? tempResulti : -256;" _CRLF);
 		// set AR
 		if( aluInstruction->destElem == 0 )
 			src->add("ARi.x = tempResulti;" _CRLF);
@@ -3027,19 +3027,19 @@ static void _emitTEXReadMemCode(LatteDecompilerShaderContext* shaderContext, Lat
 
 	sint32 readCount;
 
-	if (texInstruction->memRead.format == FMT_32_FLOAT)
+	if (texInstruction->memRead.format == Latte::E_HWFMT::HWFMT_32_FLOAT)
 	{
 		readCount = 1;
 		// todo
 		src->add("0.0");
 	}
-	else if (texInstruction->memRead.format == FMT_32_32_FLOAT)
+	else if (texInstruction->memRead.format == Latte::E_HWFMT::HWFMT_32_32_FLOAT)
 	{
 		readCount = 2;
 		// todo
 		src->add("float2(0.0,0.0)");
 	}
-	else if (texInstruction->memRead.format == FMT_32_32_32_FLOAT)
+	else if (texInstruction->memRead.format == Latte::E_HWFMT::HWFMT_32_32_32_FLOAT)
 	{
 		readCount = 3;
 		// todo
@@ -3869,7 +3869,7 @@ void LatteDecompiler_emitHelperFunctions(LatteDecompilerShaderContext* shaderCon
 
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitMSLHeader.hpp"
 
-static void LatteDecompiler_emitAttributeImport(LatteDecompilerShaderContext* shaderContext, LatteParsedFetchShaderAttribute_t& attrib)
+static void LatteDecompiler_emitAttributeImport(LatteDecompilerShaderContext* shaderContext, LatteParsedFetchShaderAttribute& attrib)
 {
 	auto src = shaderContext->shaderSource;
 
